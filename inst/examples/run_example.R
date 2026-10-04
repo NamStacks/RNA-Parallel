@@ -3,7 +3,7 @@
 ## Simulated counts, so it runs anywhere in a few minutes with no download and no
 ## configuration. Counts follow the generative model from the ComBat-seq paper's simulations.
 ## The rendered TCGA report covers the same comparison at cohort scale:
-## https://genomerx.github.io/RNA-Parallel/
+## https://namstacks.github.io/RNA-Parallel/
 ##
 ##   Rscript run_example.R [genes] [samples per batch-condition cell] [workers]
 ##
@@ -14,9 +14,9 @@ G       <- as.integer(if (length(args) >= 1) args[1] else 20000L)
 n_cell  <- as.integer(if (length(args) >= 2) args[2] else 120L)   # samples per batch-condition cell
 workers <- as.integer(if (length(args) >= 3) args[3] else 4L)
 
-need <- c(rnaparallel = 'remotes::install_github("GenomeRx/RNA-Parallel")',
+need <- c(edgeR = 'BiocManager::install("edgeR")',
+          rnaparallel = 'remotes::install_github("NamStacks/RNA-Parallel", dependencies = c("Depends", "Imports"), upgrade = "never")',
           sva = 'BiocManager::install("sva")',
-          edgeR = 'BiocManager::install("edgeR")',
           limma = 'BiocManager::install("limma")')
 missing <- names(need)[!vapply(names(need), requireNamespace, logical(1), quietly = TRUE)]
 if (length(missing)) {
