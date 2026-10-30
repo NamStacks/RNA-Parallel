@@ -1,0 +1,34 @@
+.Rproj.user
+.Rhistory
+.RData
+.Ruserdata
+*.Rproj
+*.Rcheck/
+*.tar.gz
+*.tgz
+.DS_Store
+*.html
+*_files/
+
+# the rendered reports are deliverables, keep them tracked
+!docs/index.html
+!docs/linux.html
+!docs/windows.html
+
+# TCGAbiolinks writes these next to whatever directory the render runs from
+df.rds
+results.rds
+????????-????-????-????-????????????/
+MANIFEST.txt
+GDCdata/
+
+# knitr caches: large, machine-specific, regenerable
+*_cache/
+*_cache.stale-*/
+Rplots.pdf
+*.bak
+render.log
+
+# testthat failure snapshots
+tests/testthat/_problems/
+tests/testthat/testthat-problems.rds

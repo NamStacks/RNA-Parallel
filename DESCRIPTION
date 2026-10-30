@@ -1,0 +1,52 @@
+Package: rnaparallel
+Type: Package
+Title: Exact Parallel Companions for 'sva' ComBat-Seq, 'edgeR' and 'limma'
+Version: 0.5.1
+Authors@R: c(
+    person("NamStacks", email = "231164958+NamStacks@users.noreply.github.com",
+           role = c("aut", "cre", "cph")),
+    person("Yuqing", "Zhang", role = "ctb",
+           comment = "author of ComBat-seq, accelerated but not modified by this package"),
+    person("Giovanni", "Parmigiani", role = "ctb", comment = "author of ComBat-seq"),
+    person("W. Evan", "Johnson", role = "ctb", comment = "author of ComBat-seq"))
+Description: Provides parallel companions to five RNA-seq steps that are slow
+    at cohort scale and take no worker argument: ComBat_seq() from 'sva',
+    normLibSizes() from 'edgeR', and lmFit(), duplicateCorrelation() and
+    removeBatchEffect() from 'limma'. Each calls the original function
+    unmodified, with its slow internal helpers rebound in a child of the
+    original's environment, and splits work by gene, sample or batch only
+    where each piece reads its own slice plus values computed once from the
+    whole input. The result is identical() to the original's, so the next
+    step reads it unchanged. Backends are mclapply(), 'future',
+    'BiocParallel', 'foreach' and serial. A memory guard lowers the worker
+    count when available memory is short.
+License: MIT + file LICENSE
+Encoding: UTF-8
+Depends: R (>= 4.1)
+Imports:
+    edgeR,
+    parallel
+Suggests:
+    sva,
+    limma,
+    statmod,
+    future,
+    future.apply,
+    BiocParallel,
+    foreach,
+    doParallel,
+    testthat (>= 3.1.8),
+    withr,
+    ps,
+    pkgload,
+    roxygen2 (>= 8.1.0),
+    doRNG,
+    SummarizedExperiment,
+    GenomicRanges,
+    IRanges
+Config/testthat/edition: 3
+biocViews:
+URL: https://github.com/NamStacks/RNA-Parallel
+BugReports: https://github.com/NamStacks/RNA-Parallel/issues
+Roxygen: list(markdown = TRUE)
+Config/roxygen2/version: 8.1.1
