@@ -32,3 +32,8 @@ render.log
 # testthat failure snapshots
 tests/testthat/_problems/
 tests/testthat/testthat-problems.rds
+
+# setup_linux.sh writes these while a render runs
+inst/examples/render_linux.log
+inst/examples/.render_and_publish.sh
+inst/examples/.setup_linux_install.R

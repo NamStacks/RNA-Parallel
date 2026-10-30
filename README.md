@@ -255,6 +255,22 @@ several hours and a missing prerequisite can stop it late.
 
 ### Linux (Ubuntu 20.04 tested)
 
+**One command.** Use a machine with 16 CPUs and nothing else running, because the report sweeps
+2, 4, 8 and 16 workers. Connect with VS Code Remote-SSH, open a terminal and run:
+
+```sh
+git clone https://github.com/NamStacks/RNA-Parallel && cd RNA-Parallel
+bash inst/examples/setup_linux.sh
+```
+
+In an existing clone, run `git pull` first. The script installs what is missing (it asks for
+your sudo password only for apt), checks the install, and starts the render in the background, so
+closing VS Code does not stop it. Watch it with `tail -f inst/examples/render_linux.log`. When the
+render ends, the script commits `docs/linux.html` to the branch `linux-render` and pushes it. It
+stops before the render if the machine has fewer than 16 CPUs, little free memory or other load;
+`--yes` overrides that, and `--no-render` stops after the checks. The steps below do the same by
+hand.
+
 1. Install the system libraries first. Without the headers, `xml2`, `XML`, `openssl`, `curl`,
    `png` and `fs` fail to build, usually in the middle of the install:
 
