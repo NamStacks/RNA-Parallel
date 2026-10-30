@@ -1,0 +1,8 @@
+_cache(/|$|\.stale-)
+_files(/|$)
+^inst/examples/.*\.html$
+\.log$
+GDCdata
+(^|/)MANIFEST\.txt$
+(^|/)(df|results)\.rds$
+[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}

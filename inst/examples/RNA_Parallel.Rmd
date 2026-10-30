@@ -28,13 +28,22 @@ knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = TRUE,
 # editing the correction itself invalidates them. Delete the _cache directory to force a
 # full recomputation.
 knitr::opts_chunk$set(cache.path = "RNA_Parallel_cache/")
+
+# Gate: a memory-guard warning means a sweep arm ran with fewer workers than its label says, so each cached sweep chunk records the warning and the check chunk after it stops the render.
+capped_msg <- paste0("The memory guard lowered the worker count, so the arms labeled with a worker count ",
+                     "did not run that wide and the speedups are not a worker sweep. Lower ",
+                     "options(combat.mem.divergence) or tcga_workers in chunk libs (the caches are keyed ",
+                     "to both and rebuild), or, if you only freed memory, delete RNA_Parallel_cache, ",
+                     "then render again.")
 ```
 
 `rnaparallel` runs the original function itself and parallelizes its hot paths.
-`ComBat_seq_parallel` corrects the counts; `calcNormFactors_parallel`, `lmFit_parallel`,
-and `duplicateCorrelation_parallel` run the differential expression that
-follows. None of them reimplements a method from its description: the original is called unchanged on blocks of genes or
-samples, with at most a symbol rebound in a child of the original's own environment.
+`ComBat_seq_parallel` corrects the counts; `calcNormFactors_parallel`, `lmFit_parallel`
+and `duplicateCorrelation_parallel` run the differential expression that follows, and
+`removeBatchEffect_parallel` strips the batch term from the expression matrix. None of them
+reimplements a method from its description: the original is called unchanged on blocks of genes,
+samples or batches, with a few of the functions it calls rebound in a child of the original's own
+environment.
 
 The question is narrow on purpose: **does each companion return exactly what the original
 returns, and how much time does it save.** Not close, not correlated at 0.999. Identical, or it
@@ -49,12 +58,14 @@ which parallelism is worth measuring.
 | section | what it shows |
 |---|---|
 | B. The claim in ten lines | one pipeline, run both ways, `identical()` |
-| C. Simulated counts | ComBat-seq then limma and edgeR, each against its original, at 2, 4, 6 and 8 workers |
+| C. Simulated counts | ComBat-seq then limma and edgeR, each against its original, at the worker counts set in chunk libs |
 | D. TCGA | the cohort, then the same two comparisons at cohort scale |
 | E. Equivalence summary | every quantity, computed both ways and compared |
 | F. Speed summary | every speed measurement in one figure |
 
 # A. Setup
+
+Setup for each platform, including system libraries, is in the README section Rendering the reports.
 
 ```{r install, eval = FALSE}
 if (!requireNamespace("BiocManager", quietly = TRUE)) install.packages("BiocManager")
@@ -66,7 +77,8 @@ remotes::install_github("NamStacks/RNA-Parallel",
                         dependencies = c("Depends", "Imports"),
                         upgrade = "never")
 
-cran <- c("ggplot2", "ggrepel", "patchwork", "callr", "gtsummary", "broom", "circlize", "RColorBrewer")
+cran <- c("ggplot2", "ggrepel", "patchwork", "callr", "gtsummary", "broom", "circlize", "RColorBrewer",
+         "rmarkdown", "knitr")
 need <- cran[!vapply(cran, requireNamespace, logical(1), quietly = TRUE)]
 if (length(need)) install.packages(need)
 ```
@@ -86,7 +98,7 @@ library(ggplot2)
 # measured the wrong code, silently, after an hour. Skipped when the working tree is not to hand,
 # which is the case for a reader rendering from an installed copy of the package.
 .desc <- file.path("..", "..", "DESCRIPTION")
-if (file.exists(.desc)) {
+if (file.exists(.desc) && identical(unname(read.dcf(.desc, fields = "Package")[1L, 1L]), "rnaparallel")) {
   .want <- as.character(read.dcf(.desc, fields = "Version")[[1L]])
   .have <- as.character(packageVersion("rnaparallel"))
   if (!identical(.want, .have)) {
@@ -94,6 +106,13 @@ if (file.exists(.desc)) {
          ". A pull does not reinstall. From the repository root: R CMD INSTALL . ",
          "(or devtools::install()), restart R, and render again.", call. = FALSE)
   }
+# A warning, not a stop: a fresh clone re-stamps every mtime, so this only hints that R/ may be newer than the install.
+  .bs <- packageDescription("rnaparallel")$Built
+  .built <- if (is.character(.bs)) as.POSIXct(trimws(strsplit(.bs, ";")[[1L]][3L]), tz = "UTC") else NA
+  if (!is.na(.built) && isTRUE(any(file.mtime(list.files(file.path("..", "..", "R"), full.names = TRUE)) > .built, na.rm = TRUE)))
+    warning("R/ holds files newer than the installed rnaparallel, which has the same Version. ",
+            "If the code changed since the install, run R CMD INSTALL . from the repository root, ",
+            "restart R, and render again.", call. = FALSE)
 }
 
 edgeR_norm <- if (exists("normLibSizes.default", envir = asNamespace("edgeR"), inherits = FALSE)) {
@@ -133,6 +152,15 @@ n_workers    <- max(tcga_workers)
 options(combat.backend = "mclapply")
 options(future.globals.maxSize = 8 * 1024^3)
 
+# Gate: the guard's default of 1 assumes a forked worker dirties the whole parent, which can cap sweep arms to 1 worker on a 16 GB Mac, so 0.05 assumes it dirties 5%.
+options(combat.mem.divergence = 0.05)
+
+# Everything that decides a timing or identity result, so a cached chunk is rebuilt when any of it changes.
+cache_opts <- list(divergence = getOption("combat.mem.divergence"), guard = getOption("combat.mem.guard"),
+                   backend = getOption("combat.backend"), tcga_workers = tcga_workers,
+                   n_workers = n_workers, version = packageVersion("rnaparallel"),
+                   built = packageDescription("rnaparallel")$Built)
+
 # The published macOS report ran on R's single-threaded reference BLAS (libRblas.0.dylib); Accelerate (vecLib) or OpenBLAS would open a thread pool inside every forked worker, a setup REFERENCE.md marks as untested, so the thread count is reported rather than assumed.
 
 # sessionInfo()$BLAS is NULL on an R built against its own internal BLAS, and basename(NULL)
@@ -141,11 +169,15 @@ options(future.globals.maxSize = 8 * 1024^3)
 # carry the same guard.
 blas_raw    <- sessionInfo()$BLAS
 blas_name   <- if (is.null(blas_raw) || !nzchar(blas_raw)) "R internal (reference)" else basename(blas_raw)
-blas_thread <- Sys.getenv("OPENBLAS_NUM_THREADS", Sys.getenv("VECLIB_MAXIMUM_THREADS", ""))
-blas_pinned <- identical(blas_thread, "1")
-if (grepl("openblas|mkl", blas_name, ignore.case = TRUE) && !blas_pinned)
+# Gate: the reference BLAS is single-threaded, so it counts as pinned with no environment variable set.
+blas_ref    <- grepl("Rblas[.](0[.])?dylib|internal|reference", blas_name, ignore.case = TRUE)
+blas_var    <- if (grepl("veclib|accelerate", blas_name, ignore.case = TRUE)) "VECLIB_MAXIMUM_THREADS" else
+  if (grepl("openblas", blas_name, ignore.case = TRUE)) "OPENBLAS_NUM_THREADS" else "MKL_NUM_THREADS"
+blas_pinned <- blas_ref || identical(Sys.getenv(blas_var, ""), "1")
+if (grepl("openblas|mkl|veclib|accelerate", blas_name, ignore.case = TRUE) && !blas_pinned)
   warning("A multi-threaded BLAS (", blas_name, ") is loaded and its thread count is not 1. ",
-          "The worker sweep will oversubscribe this machine and speedups will be deflated.")
+          "Render with ./render_macos.sh. The worker sweep will oversubscribe this machine and ",
+          "speedups will be deflated.")
 
 # Reported, not assumed. Every note in this file is about a platform that has fork(), so a run
 # on one that does not would be describing something that is not happening.
@@ -155,6 +187,16 @@ if (!on_macos)
           "core tiers of Apple silicon. Render RNA_Parallel_linux.Rmd or ",
           "RNA_Parallel_windows.Rmd instead.")
 
+```
+
+```{r preflight}
+# Presence only, without loading, so the session the timed sweeps run in is not changed.
+need_pkgs <- c("callr", "statmod", "broom", "gtsummary", "TCGAbiolinks", "ComplexHeatmap",
+               "circlize", "ggrepel", "patchwork", "RColorBrewer")
+miss_pkgs <- need_pkgs[!vapply(need_pkgs, function(p) nzchar(system.file(package = p)), logical(1))]
+if (length(miss_pkgs))
+  stop("install before rendering (see the install chunk in section A): ",
+       paste(miss_pkgs, collapse = ", "), call. = FALSE)
 ```
 
 # B. The claim in ten lines
@@ -304,10 +346,19 @@ sim_de <- function(mat) {
 
 One correction, computed twice. Everything in this sub-section reads these two objects.
 
-```{r sim-correct, cache = TRUE, dependson = 'sim', cache.extra = list(n_workers, packageVersion('rnaparallel'))}
+```{r sim-correct, cache = TRUE, dependson = 'sim', cache.extra = cache_opts}
+sim_caps_correct <- character()
 sim_ref <- sva::ComBat_seq(sim, batch = batch, group = group)
-sim_par <- ComBat_seq_parallel(sim, batch = batch, group = group, workers = n_workers)
+sim_par <- withCallingHandlers(
+  ComBat_seq_parallel(sim, batch = batch, group = group, workers = n_workers),
+  warning = function(w) if (grepl("workers\\s+need", conditionMessage(w)))
+    sim_caps_correct <<- c(sim_caps_correct, conditionMessage(w)))
 identical(sim_ref, sim_par)
+```
+
+```{r cap-sim-correct}
+if (length(sim_caps_correct))
+  stop(capped_msg, " First guard warning: ", sim_caps_correct[[1L]], call. = FALSE)
 ```
 
 ```{r sim-assert}
@@ -437,43 +488,37 @@ compared against the reference matrix itself, not against a summary of it.
 
 The baseline arm is `sva::ComBat_seq` itself, not this package held to one worker.
 
-```{r sim-speed, cache = TRUE, dependson = c('sim', 'sim-correct'), cache.extra = list(n_workers, packageVersion('rnaparallel'))}
+```{r sim-speed, cache = TRUE, dependson = c('sim', 'sim-correct'), cache.extra = cache_opts}
 sim_file <- file.path(tempdir(), "sim-bench.rds")
 saveRDS(list(counts = sim, batch = batch, group = group, ref = sim_ref), sim_file)
 
+sim_caps_speed <- character()
 sim_timings <- do.call(rbind, lapply(sort(unique(c(1L, tcga_workers))), function(w) {
-  r <- callr::r(function(f, w) {
+  r <- callr::r(function(f, w, div, guard) {
     suppressMessages({library(sva); library(rnaparallel)})
+# Gate: a fresh R session does not inherit the parent's options, so the guard settings are passed in and set here.
+    options(combat.mem.divergence = div, combat.mem.guard = guard)
     d  <- readRDS(f)
+    caps <- character()
     t0 <- Sys.time()
-    out <- if (w == 1L) sva::ComBat_seq(d$counts, batch = d$batch, group = d$group)
-           else ComBat_seq_parallel(d$counts, batch = d$batch, group = d$group, workers = w)
+    out <- withCallingHandlers(
+      if (w == 1L) sva::ComBat_seq(d$counts, batch = d$batch, group = d$group)
+      else ComBat_seq_parallel(d$counts, batch = d$batch, group = d$group, workers = w),
+      warning = function(cnd) if (grepl("workers\\s+need", conditionMessage(cnd)))
+        caps <<- c(caps, conditionMessage(cnd)))
     # compared against the reference matrix itself. A checksum over 1e7 cells lands near
     # 1e16, past 2^53, where one unit in the last place is about 2 and a single-cell corruption
     # rounds away: the summary that was meant to catch it cannot represent it.
     list(secs = as.numeric(difftime(Sys.time(), t0, units = "secs")),
-         same = identical(out, d$ref))
-  }, args = list(f = sim_file, w = w))
+         same = identical(out, d$ref), caps = caps)
+  }, args = list(f = sim_file, w = w, div = getOption("combat.mem.divergence"),
+                 guard = getOption("combat.mem.guard")))
+  sim_caps_speed <<- c(sim_caps_speed, r$caps)
   data.frame(workers = w, seconds = r$secs, same = r$same)
 }))
 unlink(sim_file)
 
-# Hand SIGCHLD back to `parallel`. processx, which callr runs on, calls sigaction(SIGCHLD, ...)
-# on every process it starts and restores SIG_DFL on teardown rather than the handler it
-# displaced; `parallel` installs its own once, latched, and never reinstalls. So from the first
-# callr call onward `parallel` can no longer observe its forked workers exiting, and every
-# dispatch leaves one unreaped zombie per worker for the rest of the session. They hold a
-# process-table slot each and nothing else (no memory, no CPU), but slots are the binding
-# limit here, not memory: measured 493 zombies from a single eight-worker correction at this
-# plate count, against a 4,000 per-user ceiling. This call clears parallel's latch so the next
-# mcfork reinstalls the handler, and it returns immediately because nothing is stuck yet.
-#
-# Deliberately NOT inside a companion: with shutdown = TRUE it acts on every child past every
-# cleanup mark, so it would kill a caller's own concurrent workers, which is exactly what
-# combat_reap()'s spare snapshot exists to prevent. The report is the layer that mixes the two
-# packages, so the report is where this belongs. Unix only; parallel::cleanup is in the fork
-# half of the package and does not exist on Windows, where mclapply is serial and there are no
-# forked children to lose in the first place.
+# Gate: Unix only, because parallel::cleanup does not exist on Windows; this hands SIGCHLD back to `parallel` after callr's processx reset it, which would otherwise leave one unreaped zombie per worker per dispatch against kern.maxprocperuid, and it stays out of the companions because shutdown = TRUE would kill a caller's own concurrent workers.
 if (.Platform$OS.type != "windows") {
   ok <- tryCatch({ parallel:::cleanup(kill = TRUE, detach = TRUE, shutdown = TRUE); TRUE },
                  error = function(e) FALSE)
@@ -487,6 +532,11 @@ sim_timings$speedup <- sim_timings$seconds[1] / sim_timings$seconds
 # the baseline arm is the reference, so it has nothing to compare against
 sim_timings$identical_to_original <- ifelse(sim_timings$workers == 1L, NA, sim_timings$same)
 sim_timings[, c("implementation", "seconds", "speedup", "identical_to_original")]
+```
+
+```{r cap-sim-speed}
+if (length(sim_caps_speed))
+  stop(capped_msg, " First guard warning: ", sim_caps_speed[[1L]], call. = FALSE)
 ```
 
 ```{r sim-speed-plot, fig.height = 4}
@@ -573,38 +623,42 @@ the observed false discovery rate above tends to sit over the nominal 0.05.
 ## 2. limma and edgeR against the originals
 
 The correction is half a pipeline; the differential expression that follows is the other half.
-`calcNormFactors_parallel`, `lmFit_parallel` and `duplicateCorrelation_parallel` call the
-original edgeR and limma functions unchanged on blocks of genes or samples, and each stage below
-is timed twice on the same input, once through the original and once through the companion.
+`calcNormFactors_parallel`, `lmFit_parallel`, `duplicateCorrelation_parallel` and
+`removeBatchEffect_parallel` call the original edgeR and limma functions unchanged on blocks of
+genes or samples, and each stage below is timed twice on the same input, once through the original
+and once through the companion.
 
 The contrast is the planted one, treated against control, on the corrected counts from C.1 at
 the same worker counts. Because the truth is known here, a divergence would show up as a
 different recovered gene set, not only as a failed `identical()`.
 
-```{r sim-limma, cache = TRUE, dependson = 'sim-correct', cache.extra = list(n_workers, packageVersion('rnaparallel'))}
+```{r sim-limma, cache = TRUE, dependson = 'sim-correct', cache.extra = cache_opts}
+sim_caps_limma <- character()
 sim_des <- model.matrix(~ group)
 
-sim_nf_v <- edgeR_norm(DGEList(sim_ref))
-sim_nf_p <- calcNormFactors_parallel(DGEList(sim_ref), workers = n_workers)
+withCallingHandlers({
+  sim_nf_v <- edgeR_norm(DGEList(sim_ref))
+  sim_nf_p <- calcNormFactors_parallel(DGEList(sim_ref), workers = n_workers)
 
-sim_vv    <- voom(sim_nf_v, sim_des)
-sim_fit_v <- lmFit(sim_vv, sim_des)
-sim_fit_p <- lmFit_parallel(sim_vv, sim_des, workers = n_workers)
+  sim_vv    <- voom(sim_nf_v, sim_des)
+  sim_fit_v <- lmFit(sim_vv, sim_des)
+  sim_fit_p <- lmFit_parallel(sim_vv, sim_des, workers = n_workers)
 
-sim_tt_v <- topTable(eBayes(sim_fit_v), coef = 2, number = Inf, sort.by = "none")
-sim_tt_p <- topTable(eBayes(sim_fit_p), coef = 2, number = Inf, sort.by = "none")
+  sim_tt_v <- topTable(eBayes(sim_fit_v), coef = 2, number = Inf, sort.by = "none")
+  sim_tt_p <- topTable(eBayes(sim_fit_p), coef = 2, number = Inf, sort.by = "none")
 
-# batch is the repeated unit here. A subset keeps the serial arm to minutes, and the per-gene
-# work does not change with gene count, so the ratio is the same either way.
-set.seed(20260820)
-sim_dc_genes <- sort(sample.int(nrow(sim_vv), min(3000L, nrow(sim_vv))))
-sim_dc_v <- duplicateCorrelation(sim_vv[sim_dc_genes, ], sim_des, block = batch)
-sim_dc_p <- duplicateCorrelation_parallel(sim_vv[sim_dc_genes, ], sim_des, block = batch,
+# Gate: the per-gene work does not change with gene count, so a subset keeps the serial arm to minutes at the same ratio.
+  set.seed(20260820)
+  sim_dc_genes <- sort(sample.int(nrow(sim_vv), min(3000L, nrow(sim_vv))))
+  sim_dc_v <- duplicateCorrelation(sim_vv[sim_dc_genes, ], sim_des, block = batch)
+  sim_dc_p <- duplicateCorrelation_parallel(sim_vv[sim_dc_genes, ], sim_des, block = batch,
+                                            workers = n_workers)
+
+  sim_rbe_v <- removeBatchEffect(sim_vv$E, batch = batch, design = sim_des)
+  sim_rbe_p <- removeBatchEffect_parallel(sim_vv$E, batch = batch, design = sim_des,
                                           workers = n_workers)
-
-sim_rbe_v <- removeBatchEffect(sim_vv$E, batch = batch, design = sim_des)
-sim_rbe_p <- removeBatchEffect_parallel(sim_vv$E, batch = batch, design = sim_des,
-                                        workers = n_workers)
+}, warning = function(w) if (grepl("workers\\s+need", conditionMessage(w)))
+  sim_caps_limma <<- c(sim_caps_limma, conditionMessage(w)))
 
 sim_limma_checks <- data.frame(
   stage = c("calcNormFactors (TMM)", "lmFit", "duplicateCorrelation",
@@ -613,6 +667,11 @@ sim_limma_checks <- data.frame(
                 identical(sim_dc_v, sim_dc_p), identical(sim_rbe_v, sim_rbe_p),
                 identical(sim_tt_v, sim_tt_p)))
 sim_limma_checks
+```
+
+```{r cap-sim-limma}
+if (length(sim_caps_limma))
+  stop(capped_msg, " First guard warning: ", sim_caps_limma[[1L]], call. = FALSE)
 ```
 
 ```{r sim-limma-assert}
@@ -627,7 +686,7 @@ rbind(score(sim_tt_v, "limma"),
       score(sim_tt_p, "rnaparallel companions"))
 ```
 
-```{r sim-limma-speed, cache = TRUE, dependson = 'sim-limma', cache.extra = list(n_workers, packageVersion('rnaparallel'))}
+```{r sim-limma-speed, cache = TRUE, dependson = 'sim-limma', cache.extra = cache_opts}
 # Seconds only: holding every fitted object would keep a second copy of the whole pipeline
 # resident. Each original is timed on both sides of the companion arms and averaged, so drift
 # moves both halves of a ratio together instead of inflating whichever arms ran last.
@@ -643,7 +702,8 @@ sim_pre <- c(sim_best(function() edgeR_norm(DGEList(sim_ref))),
              sim_secs(duplicateCorrelation(sim_vv[sim_dc_genes, ], sim_des, block = batch)),
              sim_best(function() removeBatchEffect(sim_vv$E, batch = batch, design = sim_des)))
 
-sim_limma_speed <- do.call(rbind, lapply(sim_grid, function(w) {
+sim_caps_lspeed <- character()
+sim_limma_speed <- withCallingHandlers(do.call(rbind, lapply(sim_grid, function(w) {
   p <- c(sim_best(function() calcNormFactors_parallel(DGEList(sim_ref), workers = w)),
          sim_best(function() lmFit_parallel(sim_vv, sim_des, workers = w)),
          sim_secs(duplicateCorrelation_parallel(sim_vv[sim_dc_genes, ], sim_des,
@@ -652,7 +712,8 @@ sim_limma_speed <- do.call(rbind, lapply(sim_grid, function(w) {
                                                         design = sim_des, workers = w)))
   invisible(gc(verbose = FALSE))
   data.frame(stage = sim_stages, workers = w, companion = p)
-}))
+})), warning = function(w) if (grepl("workers\\s+need", conditionMessage(w)))
+  sim_caps_lspeed <<- c(sim_caps_lspeed, conditionMessage(w)))
 
 sim_post <- c(sim_best(function() edgeR_norm(DGEList(sim_ref))),
               sim_best(function() lmFit(sim_vv, sim_des)),
@@ -663,6 +724,19 @@ sim_limma_speed$original <- rep((sim_pre + sim_post) / 2, length(sim_grid))
 sim_limma_speed$speedup  <- sim_limma_speed$original / sim_limma_speed$companion
 sim_drift <- max(abs(sim_post - sim_pre) / sim_pre)
 sim_limma_speed[, c("stage", "workers", "original", "companion", "speedup")]
+```
+
+```{r cap-sim-limma-speed}
+if (length(sim_caps_lspeed))
+  stop(capped_msg, " First guard warning: ", sim_caps_lspeed[[1L]], call. = FALSE)
+sim_dc_scale <- sim_limma_speed$speedup[sim_limma_speed$stage == "duplicateCorrelation" &
+                                          sim_limma_speed$workers == n_workers]
+# Gate: a duplicateCorrelation speedup under 1.5x at the widest arm means that arm did not run wide, whatever the cause.
+if (sim_dc_scale < 1.5)
+  stop("duplicateCorrelation at ", n_workers, " workers returned ", sprintf("%.2fx", sim_dc_scale),
+       " and no memory-guard cap was recorded, so likely causes are power, thermal throttling or ",
+       "background load; if it recurs on an idle plugged-in machine, check the backend and the package build. Close other work, plug in ",
+       "power, delete RNA_Parallel_cache and render again.", call. = FALSE)
 ```
 
 Every short stage is the best of three runs rather than one, because a stage lasting a second or
@@ -701,7 +775,10 @@ with any other, its cancer-type column is an exact sum of its plate columns. The
 rank and ComBat-seq refuses, rather than return an answer that cannot be attributed to either
 variable.
 
-The first run downloads the cohorts once. Later runs read the cached per-project files.
+The first run downloads the STAR count files of these cohorts from the GDC (several GB, about 7 GB
+at GDC Data Release 46.0) and needs a connection. Later runs read the cached per-project count
+files and still fetch the clinical table from the GDC on every render, falling back to a cached
+copy when the GDC cannot be reached.
 
 ```{r tcga-locate}
 # The three largest cohorts with smoking status. Runtime is driven by the number of plates,
@@ -723,6 +800,13 @@ cache_dir <- if (!dir.exists(file.path(cache_new, "smoking")) &&
 env_dir   <- Sys.getenv("RNAPARALLEL_TCGA_DIR", Sys.getenv("COMBATSEQ_TCGA_DIR", ""))
 root      <- if (nzchar(env_dir)) env_dir else cache_dir
 data_dir  <- normalizePath(file.path(root, "smoking"), mustWork = FALSE)
+
+# Gate: the GDC is needed unless every counts file and the cached clinical table already exist.
+need_gdc <- !all(file.exists(file.path(data_dir, c(paste0(projects, "-counts.rds"), "clinical.rds"))))
+if (need_gdc)
+  invisible(tryCatch(readLines(url("https://api.gdc.cancer.gov/status"), n = 1L, warn = FALSE),
+                     error = function(e) stop("api.gdc.cancer.gov is unreachable and the cohort is not fully cached in ",
+                                              data_dir, ": ", conditionMessage(e), call. = FALSE)))
 ```
 
 ```{r tcga-download}
@@ -758,12 +842,22 @@ parts <- lapply(projects, function(p) readRDS(file.path(data_dir, paste0(p, "-co
 ```{r tcga-clinical}
 suppressMessages(library(TCGAbiolinks))
 bad  <- c("not reported", "unknown", "not available", "")
-clin <- do.call(rbind, lapply(projects, function(p) {
-  d <- suppressMessages(GDCquery_clinic(p, type = "clinical"))
-  if (!"tobacco_smoking_status" %in% names(d)) return(NULL)
-  data.frame(patient = d$submitter_id, status = as.character(d$tobacco_smoking_status),
-             stringsAsFactors = FALSE)
-}))
+clin_file <- file.path(data_dir, "clinical.rds")
+clin <- tryCatch({
+  clin_new <- do.call(rbind, lapply(projects, function(p) {
+    d <- suppressMessages(GDCquery_clinic(p, type = "clinical"))
+    if (!"tobacco_smoking_status" %in% names(d)) return(NULL)
+    data.frame(patient = d$submitter_id, status = as.character(d$tobacco_smoking_status),
+               stringsAsFactors = FALSE)
+  }))
+  saveRDS(clin_new, clin_file)
+  clin_new
+}, error = function(e) {
+  if (!file.exists(clin_file))
+    stop("GDCquery_clinic failed and there is no cached ", clin_file, ": ", conditionMessage(e), call. = FALSE)
+  warning("GDCquery_clinic failed (", conditionMessage(e), "); using the cached ", clin_file, call. = FALSE)
+  readRDS(clin_file)
+})
 clin <- clin[!is.na(clin$status) & !(tolower(clin$status) %in% bad), ]
 # The GDC label as recorded, not a collapsed grouping. Lifelong Non-Smoker is the reference,
 # so the differential expression coefficient below is current smokers against never smokers and
@@ -911,25 +1005,32 @@ data.frame(parallel_only_arguments = setdiff(names(b), names(a)))
 One correction of the whole cohort per worker count, each compared against `sva::ComBat_seq`
 on the same call. Only the last arm is kept for the figures below.
 
-```{r tcga-correct, cache = TRUE, cache.lazy = FALSE, dependson = 'tcga-cohort', cache.extra = list(tcga_workers, dim(covar), colnames(covar), packageVersion('rnaparallel'))}
+```{r tcga-correct, cache = TRUE, cache.lazy = FALSE, dependson = 'tcga-cohort', cache.extra = list(cache_opts, dim(covar), colnames(covar))}
 t0  <- Sys.time()
 ref <- sva::ComBat_seq(counts, batch = plate, group = NULL, covar_mod = covar)
 secs_ref <- as.numeric(difftime(Sys.time(), t0, units = "secs"))
 
-# Each worker count corrects the whole matrix again. Only the last arm is kept: a corrected
-# copy of this cohort is about 110 MB, and holding every arm buys nothing once its output has
-# been compared against the reference.
+# Only the last arm's corrected matrix is kept, because every arm is compared against the reference as it finishes.
 secs_w <- numeric(length(tcga_workers))
 same_w <- logical(length(tcga_workers))
+tcga_caps <- character()
 for (i in seq_along(tcga_workers)) {
   t1  <- Sys.time()
-  out <- ComBat_seq_parallel(counts, batch = plate, group = NULL, covar_mod = covar,
-                             workers = tcga_workers[i])
+  out <- withCallingHandlers(
+    ComBat_seq_parallel(counts, batch = plate, group = NULL, covar_mod = covar,
+                        workers = tcga_workers[i]),
+    warning = function(w) if (grepl("workers\\s+need", conditionMessage(w)))
+    tcga_caps <<- c(tcga_caps, conditionMessage(w)))
   secs_w[i] <- as.numeric(difftime(Sys.time(), t1, units = "secs"))
   same_w[i] <- identical(out, ref)
   if (i == length(tcga_workers)) par <- out
   rm(out); invisible(gc(verbose = FALSE))
 }
+```
+
+```{r cap-tcga-correct}
+if (length(tcga_caps))
+  stop(capped_msg, " First guard warning: ", tcga_caps[[1L]], call. = FALSE)
 ```
 
 ```{r tcga-identical-assert}
@@ -1191,11 +1292,17 @@ p_tab <- ggplot(tab10, aes(y = y)) +
   theme(plot.title = element_text(face = "bold", size = 13, margin = margin(b = 8)),
         plot.margin = margin(6, 6, 6, 14))
 
+y_genes <- c("DDX3Y", "KDM5D", "UTY", "EIF1AY", "RPS4Y1", "RPS4Y2", "USP9Y", "ZFY", "TXLNGY",
+             "NLGN4Y", "TBL1Y", "PCDH11Y", "TMSB4Y", "AMELY", "SRY")
+n_y    <- sum(top10$symbol %in% y_genes)
+y_note <- if (n_y > 0) sprintf(" %d of the top 10 genes are Y-linked: part of this contrast is sex.", n_y) else ""
+
 p_vol + p_tab + plot_layout(widths = c(4, 1.5)) +
   plot_annotation(
     title = "Differential expression, current versus never smokers",
-    subtitle = sprintf("%s genes at FDR < 0.05 and |logFC| > 1 in both arms. Several top genes are Y-linked: part of this contrast is sex.",
-                        format(sum(tt_par$adj.P.Val < 0.05 & abs(tt_par$logFC) > 1), big.mark = ",")),
+    subtitle = sprintf("%s genes at FDR < 0.05 and |logFC| > 1 in both arms.%s",
+                        format(sum(tt_par$adj.P.Val < 0.05 & abs(tt_par$logFC) > 1), big.mark = ","),
+                        y_note),
     theme = theme(plot.title = element_text(face = "bold", size = 18, margin = margin(b = 4)),
                   plot.subtitle = element_text(size = 13, colour = "grey30", margin = margin(b = 10))))
 ```
@@ -1411,20 +1518,24 @@ left serial.
 
 ### a. The differential expression pipeline, both ways
 
-```{r limma-de, cache = TRUE, cache.lazy = FALSE, dependson = 'tcga-correct', cache.extra = list(n_workers, de_coef, colnames(de_design), packageVersion('rnaparallel'))}
-nf_v <- edgeR_norm(DGEList(ref))
-nf_p <- calcNormFactors_parallel(DGEList(ref), workers = n_workers)
+```{r limma-de, cache = TRUE, cache.lazy = FALSE, dependson = 'tcga-correct', cache.extra = list(cache_opts, de_coef, colnames(de_design))}
+de_caps <- character()
+withCallingHandlers({
+  nf_v <- edgeR_norm(DGEList(ref))
+  nf_p <- calcNormFactors_parallel(DGEList(ref), workers = n_workers)
 
-vv <- voom(nf_v, de_design)
-fit_v <- lmFit(vv, de_design)
-fit_p <- lmFit_parallel(vv, de_design, workers = n_workers)
+  vv <- voom(nf_v, de_design)
+  fit_v <- lmFit(vv, de_design)
+  fit_p <- lmFit_parallel(vv, de_design, workers = n_workers)
 
-tt_limma_v <- topTable(eBayes(fit_v), coef = de_coef, number = Inf, sort.by = "none")
-tt_limma_p <- topTable(eBayes(fit_p), coef = de_coef, number = Inf, sort.by = "none")
+  tt_limma_v <- topTable(eBayes(fit_v), coef = de_coef, number = Inf, sort.by = "none")
+  tt_limma_p <- topTable(eBayes(fit_p), coef = de_coef, number = Inf, sort.by = "none")
 
-rbe_v <- removeBatchEffect(vv$E, batch = plate, design = de_design)
-rbe_p <- removeBatchEffect_parallel(vv$E, batch = plate, design = de_design,
-                                    workers = n_workers)
+  rbe_v <- removeBatchEffect(vv$E, batch = plate, design = de_design)
+  rbe_p <- removeBatchEffect_parallel(vv$E, batch = plate, design = de_design,
+                                      workers = n_workers)
+}, warning = function(w) if (grepl("workers\\s+need", conditionMessage(w)))
+  de_caps <<- c(de_caps, conditionMessage(w)))
 
 limma_checks <- data.frame(
   stage = c("calcNormFactors (TMM)", "lmFit", "removeBatchEffect",
@@ -1433,6 +1544,11 @@ limma_checks <- data.frame(
                 identical(rbe_v, rbe_p),
                 identical(tt_limma_v, tt_limma_p), identical(tt_limma_v, tt_ref)))
 limma_checks
+```
+
+```{r cap-limma-de}
+if (length(de_caps))
+  stop(capped_msg, " First guard warning: ", de_caps[[1L]], call. = FALSE)
 ```
 
 ```{r limma-de-assert}
@@ -1448,7 +1564,7 @@ assertion is made on `topTable` rather than on the object it came from.
 `duplicateCorrelation` is the expensive step in a repeated-measures limma analysis: one REML fit
 and one LAPACK SVD per gene. Plate is the repeated unit here.
 
-```{r limma-dupcor, cache = TRUE, cache.lazy = FALSE, dependson = 'limma-de', cache.extra = list(n_workers, de_coef, colnames(de_design), packageVersion('rnaparallel'))}
+```{r limma-dupcor, cache = TRUE, cache.lazy = FALSE, dependson = 'limma-de', cache.extra = list(cache_opts, de_coef, colnames(de_design))}
 # The serial arm has to run in full for there to be anything to compare against, and the
 # per-gene work does not change with gene count, so the ratio is the same on a subset while the
 # baseline costs minutes instead of hours. Fixed random draw, and the identical() claim below is
@@ -1457,13 +1573,22 @@ set.seed(20260820)
 dc_genes <- sort(sample.int(nrow(vv), min(4000L, nrow(vv))))
 v_dc <- vv[dc_genes, ]
 
+dc_caps <- character()
 dc_v <- duplicateCorrelation(v_dc, de_design, block = plate)
-dc_p <- duplicateCorrelation_parallel(v_dc, de_design, block = plate, workers = n_workers)
+dc_p <- withCallingHandlers(
+  duplicateCorrelation_parallel(v_dc, de_design, block = plate, workers = n_workers),
+  warning = function(w) if (grepl("workers\\s+need", conditionMessage(w)))
+    dc_caps <<- c(dc_caps, conditionMessage(w)))
 dc_same <- identical(dc_v, dc_p)
 
 data.frame(quantity = c("genes used", "consensus correlation", "identical()"),
            value = c(format(length(dc_genes), big.mark = ","),
                      sprintf("%.6f", dc_v$consensus.correlation), dc_same))
+```
+
+```{r cap-limma-dupcor}
+if (length(dc_caps))
+  stop(capped_msg, " First guard warning: ", dc_caps[[1L]], call. = FALSE)
 ```
 
 Timing for this stage is in D.3.d, where the baseline is bracketed rather than read once.
@@ -1475,33 +1600,27 @@ stopifnot(dc_same)
 ### c. What is deliberately not parallelized
 
 Not everything survives the exactness bar, and the list of rejections is as much a part of this
-package as the list of companions. `voom` measured 0.99x, because its `lowess` trend takes its
-span as a fraction of the gene count. `contrasts.fit` returns before a fork could finish
+package as the list of companions. `voom` measured 0.99x on an earlier M3 run, because its `lowess` trend takes
+its span as a fraction of the gene count. `contrasts.fit` returns before a fork could finish
 starting. `eBayes`, `fitFDist` and `topTable` pool across every gene by construction.
 
 Two edgeR companions were built, measured, and then deleted, both for the same reason: an edgeR
 kernel that is not a pure function of the gene it fits. `estimateDisp` diverged once one library
-was heavily over-sequenced. `glmQLFit` measured 1.6x and passed every small fixture, then failed
+was heavily over-sequenced. `glmQLFit` measured 1.6x on that M3 and passed every small fixture, then failed
 on this cohort: `mglmLevenberg` records a deviance and an iteration count whose values depend on
-which genes share the block when a fit does not converge cleanly, 22 of 18,270 genes here, with
+which genes share the block when a fit does not converge cleanly, 22 of 18,270 genes in the original M3 render of this cohort, with
 no flag set on any of them. The assert in this report is what caught it, which is the reason
 every stage in this document carries one.
 
 ### d. Speed
 
-```{r limma-speed, cache = TRUE, cache.lazy = FALSE, dependson = c('limma-de', 'limma-dupcor'), cache.extra = list(tcga_workers, de_coef, colnames(de_design), packageVersion('rnaparallel'))}
+```{r limma-speed, cache = TRUE, cache.lazy = FALSE, dependson = c('limma-de', 'limma-dupcor'), cache.extra = list(cache_opts, de_coef, colnames(de_design))}
 # Seconds only. Returning the fitted object too held a second copy of four results nothing
 # reads, about 400 MB, resident at the moment the next line forks.
 tick <- function(e) { t0 <- Sys.time(); force(e)
                       as.numeric(difftime(Sys.time(), t0, units = "secs")) }
 
-# The BEST of three, not one reading and not their mean. A stage that takes a second or two is
-# not robust to whatever else the machine decides to do during it: one render timed lmFit at
-# four workers at 14.19 s against 1.70 s for the identical call minutes earlier, and reported
-# it as 0.39x, slower than serial. The minimum is the reading least contaminated by load,
-# which is the quantity this table is actually claiming. Long stages are left at one reading:
-# duplicateCorrelation runs eleven minutes serial, long enough to absorb a transient spike
-# rather than be defined by one, and three of them would cost an hour to say the same thing.
+# Stages near a second take the best of three readings; duplicateCorrelation stays one reading because its serial run lasts minutes.
 best <- function(f, reps = 3L) min(vapply(seq_len(reps), function(i) tick(f()), numeric(1)))
 
 # Each original is timed on both sides of the companion arms and the mean is the denominator,
@@ -1512,7 +1631,8 @@ pre <- c(best(function() edgeR_norm(DGEList(ref))),
          tick(duplicateCorrelation(v_dc, de_design, block = plate)),
          best(function() removeBatchEffect(vv$E, batch = plate, design = de_design)))
 
-limma_speed <- do.call(rbind, lapply(tcga_workers, function(w) {
+limma_caps <- character()
+limma_speed <- withCallingHandlers(do.call(rbind, lapply(tcga_workers, function(w) {
   p <- c(best(function() calcNormFactors_parallel(DGEList(ref), workers = w)),
          best(function() lmFit_parallel(vv, de_design, workers = w)),
          tick(duplicateCorrelation_parallel(v_dc, de_design, block = plate, workers = w)),
@@ -1520,7 +1640,8 @@ limma_speed <- do.call(rbind, lapply(tcga_workers, function(w) {
                                                     design = de_design, workers = w)))
   invisible(gc(verbose = FALSE))
   data.frame(stage = stages, workers = w, companion = p)
-}))
+})), warning = function(w) if (grepl("workers\\s+need", conditionMessage(w)))
+  limma_caps <<- c(limma_caps, conditionMessage(w)))
 
 post <- c(best(function() edgeR_norm(DGEList(ref))),
           best(function() lmFit(vv, de_design)),
@@ -1530,20 +1651,37 @@ post <- c(best(function() edgeR_norm(DGEList(ref))),
 limma_speed$original <- rep((pre + post) / 2, length(tcga_workers))
 limma_speed$speedup  <- limma_speed$original / limma_speed$companion
 limma_drift <- max(abs(post - pre) / pre)
+w_half      <- max(tcga_workers[tcga_workers <= n_workers / 2])
+limma_scale <- limma_speed$speedup[limma_speed$workers == n_workers] /
+  limma_speed$speedup[limma_speed$workers == w_half]
 limma_speed[, c("stage", "workers", "original", "companion", "speedup")]
 ```
 
-All three worker counts are shown, matching every other sweep in the report. Eight workers do not
-return twice what four return, and not because half of them are stranded on efficiency cores:
-given identical work, eight forked children here finish within 1.08x of each other, where
-stranding would show as roughly threefold. Concurrency is what costs, so each added worker
-returns less throughput than the one before it.
+```{r cap-limma-speed}
+if (length(limma_caps))
+  stop(capped_msg, " First guard warning: ", limma_caps[[1L]], call. = FALSE)
+limma_dc_scale <- limma_speed$speedup[limma_speed$stage == "duplicateCorrelation" &
+                                        limma_speed$workers == n_workers]
+# Gate: a duplicateCorrelation speedup under 1.5x at the widest arm means that arm did not run wide, whatever the cause.
+if (limma_dc_scale < 1.5)
+  stop("duplicateCorrelation at ", n_workers, " workers returned ", sprintf("%.2fx", limma_dc_scale),
+       " and no memory-guard cap was recorded, so likely causes are power, thermal throttling or ",
+       "background load; if it recurs on an idle plugged-in machine, check the backend and the package build. Close other work, plug in ",
+       "power, delete RNA_Parallel_cache and render again.", call. = FALSE)
+```
 
-Method as in C.2: `calcNormFactors` and `lmFit` are the best of three runs, and originals are
-bracketed before and after the companion arms, those two readings differing by at most
-`r sprintf("%.1f%%", 100 * limma_drift)`. `duplicateCorrelation` is a single reading at each
-point, because eleven minutes serial is long enough to absorb a transient spike rather than be
-defined by one.
+All `r length(tcga_workers)` worker counts are shown, matching every other sweep in the report.
+Going from `r w_half` to `r n_workers` workers multiplies the speedup by `r sprintf("%.2f", min(limma_scale))`
+to `r sprintf("%.2f", max(limma_scale))` across the stages, where doubling the workers and doubling the
+speed would give `r sprintf("%.2f", n_workers / w_half)`. Concurrency has a cost, so added workers can return
+less throughput each than the ones before them. Which core tier a worker lands on is the operating
+system's choice and this report does not measure it; the tiers are listed in the machine table.
+
+Method as in C.2: `calcNormFactors`, `lmFit` and `removeBatchEffect` are the best of three runs,
+and originals are bracketed before and after the companion arms, those two readings differing by
+at most `r sprintf("%.1f%%", 100 * limma_drift)`. `duplicateCorrelation` is a single reading at each
+point, because a serial reading of `r sprintf("%.0f", limma_speed$original[limma_speed$stage == "duplicateCorrelation"][1] / 60)` minutes
+is long enough to absorb a transient spike rather than be defined by one.
 
 ```{r limma-speed-plot, fig.height = 4.2}
 ggplot(limma_speed, aes(factor(workers), speedup, fill = stage)) +
@@ -1561,8 +1699,8 @@ ggplot(limma_speed, aes(factor(workers), speedup, fill = stage)) +
 ```
 
 Not everything in limma is worth forking, and the list of what was left alone is as much a part
-of the result as the list of what was not. `voom` measured 0.99x, because its `lowess` trend takes
-its span as a fraction of the gene count, so a block of half the genes fits a different curve and
+of the result as the list of what was not. `voom` measured 0.99x on an earlier M3 run, because its `lowess`
+trend takes its span as a fraction of the gene count, so a block of half the genes fits a different curve and
 only the arithmetic after the trend splits. `contrasts.fit` is exactly splittable and the original
 returns before a fork could finish starting. `eBayes`, `fitFDist` and `topTable` pool across every gene by construction.
 None of them ships as a `workers` argument that does nothing.
@@ -1663,7 +1801,7 @@ ggplot(all_speed, aes(factor(workers), speedup, fill = stage)) +
   scale_fill_manual(values = pal_stage) +
   labs(x = "workers", y = "speedup against the original", fill = NULL,
        title = "Every companion against its original",
-       subtitle = "Dashed line is the original. Every arm at 2, 4, 6 and 8 workers.") +
+       subtitle = sprintf("Dashed line is the original. Every arm at %s workers.", paste(tcga_workers, collapse = ", "))) +
   expand_limits(y = 0) +
   theme(legend.position = "bottom")
 ```

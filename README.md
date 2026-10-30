@@ -11,20 +11,20 @@ defaults (exceptions under [Use](#use)), same result, faster at cohort scale.
 Rendered analysis: [macOS](https://namstacks.github.io/RNA-Parallel/) ·
 [Linux](https://namstacks.github.io/RNA-Parallel/linux.html) ·
 [Windows](https://namstacks.github.io/RNA-Parallel/windows.html)
-(rendered with rnaparallel 0.5.0)
+(macOS rendered with rnaparallel 0.5.1; Linux and Windows with 0.5.0, re-render pending)
 
 ## Speedup
 
 TCGA, 18,270 genes by 1,500 tumors. Every arm `identical()` to the original on all three
-platforms. macOS: M3, 4P+4E. Linux: 2x Xeon, 16 cores. Windows: Ultra 9 185H, 6P+10E.
+platforms. macOS: Mac mini M6, 6 fast + 6 efficiency cores. Linux: 2x Xeon, 16 cores. Windows: Ultra 9 185H, 6P+10E.
 
 | companion | runs | macOS | Linux | Windows |
 |---|---|---:|---:|---:|
-| `ComBat_seq_parallel()` | `sva::ComBat_seq` | 5.43x @ 8w | **9.34x @ 16w** | 3.57x @ 6w |
-| `calcNormFactors_parallel()` | `edgeR::normLibSizes` | **6.78x @ 8w** | 4.12x @ 8w | 1.74x @ 2w |
-| `lmFit_parallel()` | `limma::lmFit` | 3.02x @ 8w | **3.37x @ 16w** | 1.10x @ 4w |
-| `duplicateCorrelation_parallel()` | `limma::duplicateCorrelation` | 3.79x @ 6w | **7.22x @ 16w** | 2.07x @ 4w |
-| `removeBatchEffect_parallel()` | `limma::removeBatchEffect` | **2.97x @ 6w** | 1.39x @ 8w | 0.90x @ 2w |
+| `ComBat_seq_parallel()` | `sva::ComBat_seq` | 5.31x @ 8w | **9.34x @ 16w** | 3.57x @ 6w |
+| `calcNormFactors_parallel()` | `edgeR::normLibSizes` | **5.78x @ 8w** | 4.12x @ 8w | 1.74x @ 2w |
+| `lmFit_parallel()` | `limma::lmFit` | 1.58x @ 8w | **3.37x @ 16w** | 1.10x @ 4w |
+| `duplicateCorrelation_parallel()` | `limma::duplicateCorrelation` | 4.53x @ 6w | **7.22x @ 16w** | 2.07x @ 4w |
+| `removeBatchEffect_parallel()` | `limma::removeBatchEffect` | **3.11x @ 8w** | 1.39x @ 8w | 0.90x @ 2w |
 
 Bold = fastest platform per row. Windows has no `fork()` (a worker is a full copied process, and
 only 6 of 16 cores are performance cores), which caps its scaling; `lmFit`/`removeBatchEffect`
@@ -150,7 +150,8 @@ count matrix instead. See
 **Check it yourself:** [REFERENCE.md](REFERENCE.md#full-self-check) has the full comparison
 against all five originals, no download required. At cohort scale, the same checks run as
 [rendered reports](https://namstacks.github.io/RNA-Parallel/) on all three platforms, sourced from
-[inst/examples/](inst/examples/). [tests/](tests/testthat) covers every argument path, chunk
+[inst/examples/](inst/examples/); to rebuild one on your own machine, see
+[Rendering the reports](#rendering-the-reports). [tests/](tests/testthat) covers every argument path, chunk
 layout, backend, and dispatch count: 400+ assertions.
 
 **See what's running:** on macOS and Linux every parallel dispatch draws a live `|====------|`
@@ -185,6 +186,157 @@ it reads total RAM through `ps`. See [REFERENCE.md](REFERENCE.md#memory).
 | `parallel_backend` | `getOption("combat.backend")`, else `"mclapply"`; on Windows `"future"` when a multi-worker future plan is active | you cannot fork, or a cluster is already running |
 
 Full backend, nesting, and size-gate detail in [REFERENCE.md](REFERENCE.md#tuning-internals).
+
+## Rendering the reports
+
+The three reports in [inst/examples/](inst/examples/) are `RNA_Parallel.Rmd` (macOS),
+`RNA_Parallel_linux.Rmd` and `RNA_Parallel_windows.Rmd`. Each one runs the full cohort-scale
+check on the machine that renders it, so read this section before you start: a render takes
+several hours and a missing prerequisite can stop it late.
+
+**Every platform**
+
+- **R and RStudio Desktop.** `R >= 4.1` is the package minimum. The published reports used R 4.4.2
+  on macOS and on Ubuntu 20.04.6, and R 4.6.1 on Windows 11. RStudio also supplies pandoc, which
+  `rmarkdown` needs to write the HTML.
+- **Network.** The first render downloads about 6.8 GiB from the GDC (1,729 STAR count files for
+  TCGA-HNSC, TCGA-LUAD and TCGA-LUSC) and queries the clinical table, so keep a live connection
+  until that render ends. Later renders reuse the downloaded files. A report that saved a copy of
+  the clinical table reuses it too; one that did not asks the GDC again, so check which you have
+  before you render offline.
+- **Disk.** Keep at least 15 GB free where the files land: your user cache folder
+  (`tools::R_user_dir("rnaparallel", "cache")`), or the folder named in the `RNAPARALLEL_TCGA_DIR`
+  environment variable. Knitr also writes a `*_cache` folder next to the notebook. Do not copy a
+  `*_cache` folder from one machine to another: it holds the timings of the machine that made it,
+  and a copy would put those numbers in your report.
+- **Stay awake and plugged in.** Timings are wall-clock, so a sleep inside a timed arm lands in the
+  report, and a laptop on battery can throttle. Plug in, close heavy programs and do not let the
+  machine sleep until the render ends.
+- **Check the install.** After the package is installed and R restarted, run these two lines in
+  the R console. `BiocManager::valid()` must report `TRUE`, and the version must match `Version`
+  in the repo's `DESCRIPTION` file:
+
+  ```r
+  BiocManager::valid()
+  packageVersion("rnaparallel")
+  ```
+
+  If `valid()` lists out-of-date packages, run `BiocManager::install(ask = FALSE)`, restart R and
+  run the two checks again.
+
+- **Reinstalling is safe after a render.** `.Rinstignore` keeps the knitr caches, rendered HTML,
+  `GDCdata`, `MANIFEST.txt`, `df.rds`, `results.rds` and GDC staging folders out of the installed
+  library, so `R CMD INSTALL .` and `install.packages(<repo path>, repos = NULL, type = "source")`
+  from a repo that has already rendered both stay small.
+
+### macOS
+
+1. Install R 4.4 or newer for your chip from [CRAN](https://cran.r-project.org/bin/macosx/) and
+   [RStudio Desktop](https://posit.co/download/rstudio-desktop/). Binary packages need no
+   compiler; install the Xcode command line tools (`xcode-select --install`) only if R offers to
+   build a package from source. No RStudio: `brew install pandoc` instead.
+2. Get the repo: `git clone https://github.com/NamStacks/RNA-Parallel`, or `git pull` inside an
+   existing clone.
+3. Open `inst/examples/RNA_Parallel.Rmd` in RStudio and run its `install` chunk once (it is
+   `eval = FALSE`, so neither the script nor Knit runs it). Then, from the repo root in a
+   terminal, run `R CMD INSTALL .` and restart R, then run the two checks above. Repeat after
+   every `git pull`: a pull updates the source and not the installed package, and the report
+   stops when the two versions differ.
+4. Render with the script, or click Knit in RStudio:
+
+   ```sh
+   inst/examples/render_macos.sh
+   ```
+
+   The script keeps the Mac awake while it runs. For Knit, run `caffeinate -i` in a terminal
+   first, or turn off automatic sleeping in System Settings.
+5. The HTML lands next to the notebook: `inst/examples/RNA_Parallel.html`. Send that one file
+   back, not `GDCdata`, `*_cache` or any `.rds`.
+
+### Linux (Ubuntu 20.04 tested)
+
+1. Install the system libraries first. Without the headers, `xml2`, `XML`, `openssl`, `curl`,
+   `png` and `fs` fail to build, usually in the middle of the install:
+
+   ```sh
+   sudo apt-get update
+   sudo apt-get install -y build-essential gfortran pkg-config curl \
+     libcurl4-openssl-dev libssl-dev libxml2-dev libuv1-dev libpng-dev zlib1g-dev
+   ```
+
+   Ubuntu's own `r-base` is too old (3.6.3 on 20.04). Install R from the CRAN apt repository
+   instead. The [CRAN page](https://cloud.r-project.org/bin/linux/ubuntu/) no longer lists 20.04,
+   but the `focal-cran40` repository is still served and its newest R for 20.04 is 4.5.2 (the
+   package needs 4.1 or newer). Add its signing key as that page describes, then the line:
+
+   ```sh
+   sudo add-apt-repository "deb https://cloud.r-project.org/bin/linux/ubuntu focal-cran40/"
+   sudo apt-get update
+   sudo apt-get install -y r-base r-base-dev
+   ```
+
+   RStudio is optional: the script needs only R and pandoc 2.8 or newer, and the `pandoc` in
+   Ubuntu 20.04's archive is older than that. Take a pandoc `.deb` from
+   [github.com/jgm/pandoc/releases](https://github.com/jgm/pandoc/releases), or the RStudio
+   build that still supports 20.04: Desktop 2024.12.1-563
+   (`download1.rstudio.org/electron/focal/amd64/rstudio-2024.12.1-563-amd64.deb`) or Server
+   2025.05.1-513 (`download2.rstudio.org/server/focal/amd64/rstudio-server-2025.05.1-513-amd64.deb`).
+   Newer RStudio builds are for Ubuntu 22.04 and later and will not install on 20.04.
+2. Get the repo: `git clone https://github.com/NamStacks/RNA-Parallel`, or `git pull`.
+3. Open `inst/examples/RNA_Parallel_linux.Rmd` and run its `install` chunk once. Then, from the
+   repo root, run `R CMD INSTALL .`, restart R and run the two checks above. Repeat after every
+   `git pull`.
+4. Render with the script. Prefer it to Knit on Linux: it pins OpenBLAS to one thread before R
+   starts. Knit also works when RhpcBLASctl (installed by the install chunk) can pin the BLAS;
+   otherwise the report stops and prints the export command. Use `bash`, not `sh`.
+
+   ```sh
+   bash inst/examples/render_linux.sh
+   ```
+
+   The script blocks sleep through `systemd-inhibit` when that is installed; on a laptop, also
+   turn off suspend in the power settings.
+5. The HTML lands next to the notebook: `inst/examples/RNA_Parallel_linux.html`. Send that one
+   file back.
+
+### Windows 11
+
+1. Install R 4.6 or newer (64-bit) from [CRAN](https://cran.r-project.org/bin/windows/base/) and
+   [RStudio Desktop](https://posit.co/download/rstudio-desktop/). Rtools is not required: the
+   package has no compiled code and the dependencies ship Windows binaries. Install Rtools45
+   (CRAN lists it for R 4.5 and later) only if R offers to build a package from source and you
+   cannot answer No.
+2. Get the repo into a short folder outside OneDrive: install
+   [Git for Windows](https://git-scm.com/download/win) and run
+   `git clone https://github.com/NamStacks/RNA-Parallel C:\src\RNA-Parallel`, or download the ZIP
+   from GitHub, unzip it and rename the folder that holds `DESCRIPTION` to `C:\src\RNA-Parallel`.
+   Then, once, point the GDC download at a short path, because the default folder sits within a
+   few characters of Windows's 260-character path limit: `setx RNAPARALLEL_TCGA_DIR C:\tcga`.
+   Close and reopen RStudio, and open a new PowerShell window before you run the script, so both
+   see the variable.
+3. Open `inst/examples/RNA_Parallel_windows.Rmd` in RStudio and run its `install` chunk once.
+   Then, in the R console, install the package from the repo, restart R and run the two checks
+   above. Repeat after every `git pull`.
+
+   ```r
+   install.packages("C:/src/RNA-Parallel", repos = NULL, type = "source")
+   ```
+
+4. Plug in, set Settings > System > Power & battery > Power mode to Best performance, and
+   render with the script. A stock Windows 11 has the execution policy `Restricted`, which
+   refuses to run any `.ps1` file, so the command below sets the policy for this one process
+   only. The script keeps the machine awake while it runs; for Knit, set sleep to Never first.
+   If Windows Defender Firewall asks whether R or Rscript may talk on the network when the first
+   parallel run starts, allow it on Private networks.
+
+   ```powershell
+   powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\src\RNA-Parallel\inst\examples\render_windows.ps1
+   ```
+
+   Or open the notebook in RStudio and click Knit. Knit skips the BLAS thread pin, the keep-awake
+   call and the battery warning; the BLAS pin matters only on OpenBLAS and MKL builds of R.
+5. The HTML lands next to the notebook: `inst\examples\RNA_Parallel_windows.html`. Send that one
+   file back.
 
 ## License
 

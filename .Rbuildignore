@@ -12,3 +12,8 @@
 ^LICENSE\.md$
 ^REFERENCE\.md$
 ^tools$
+^inst/examples/GDCdata$
+^inst/examples/MANIFEST\.txt$
+^inst/examples/(df|results)\.rds$
+^inst/examples/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$
+^inst/examples/.*_cache\.stale-.*$
