@@ -63,8 +63,10 @@ only the default chunk count, and that backend's width bounds concurrency; see
 \item{chunks}{Column chunks per dispatch. Defaults to \code{workers}; passing \code{chunks = workers} explicitly is redundant.}
 
 \item{parallel_backend}{One of \code{\link[=combat_backends]{combat_backends()}}, or a function
-\verb{function(idx, f, workers)} returning a list in the order of \code{idx}. Defaults to
-\code{getOption("combat.backend", combat_default_backend())}.}
+\verb{function(idx, f, workers)} returning a list in the order of \code{idx}. Treat the
+elements of \code{idx} as opaque and pass each to \code{f}: where the function's workers do not
+share this process's memory, each element is that chunk's own columns rather than an
+index vector. Defaults to \code{getOption("combat.backend", combat_default_backend())}.}
 
 \item{backend}{Optional edgeR default normalization method to wrap. Defaults to
 \code{normLibSizes.default} when available, with the older name as a fallback.}

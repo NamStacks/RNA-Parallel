@@ -34,6 +34,7 @@ withr::local_options(combat.min.cells = 0, combat.min.disp.cells = 0,
                      .local_envir = testthat::teardown_env())
 
 withr::local_envvar(c(MC_CORES = NA, SLURM_CPUS_PER_TASK = NA, NSLOTS = NA,
-                      PBS_NUM_PPN = NA, LSB_DJOB_NUMPROC = NA),
+                      PBS_NUM_PPN = NA, LSB_DJOB_NUMPROC = NA,
+                      SLURM_JOB_ID = NA, SLURM_CPUS_ON_NODE = NA, SLURM_JOB_CPUS_PER_NODE = NA),
                     .local_envir = testthat::teardown_env())
 withr::local_options(mc.cores = NULL, .local_envir = testthat::teardown_env())

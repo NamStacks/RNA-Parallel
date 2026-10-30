@@ -127,7 +127,8 @@ rp_row_blocks <- function(M, weights, env, workers, chunks, parallel_backend, wh
   parts <- combat_parallel_check(
     combat_parallel_lapply(
       idx, per_block,
-      workers, parallel_backend, cells = length(M), min_cells = min_cells),
+      workers, parallel_backend, cells = length(M), min_cells = min_cells,
+      what = what),
     what, idx)
 
 # Before the replay below, so a stand-down leaves serial_fn() the only source of conditions.

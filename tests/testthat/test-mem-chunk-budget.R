@@ -75,7 +75,12 @@ test_that("a real companion call is bit-identical with the budget forcing extra 
   expect_identical(got, ref)
 
   sizes <- list()
-  spy <- function(idx, f, workers) { sizes[[length(sizes) + 1L]] <<- lengths(idx); lapply(idx, f) }
+# A backend that serializes its tasks is handed per-chunk column slices (a list holding x), not index vectors, so a chunk's size is its column count there and its length elsewhere.
+  chunk_n <- function(e) if (is.list(e)) ncol(e$x) else length(e)
+  spy <- function(idx, f, workers) {
+    sizes[[length(sizes) + 1L]] <<- vapply(idx, chunk_n, integer(1))
+    lapply(idx, f)
+  }
   expect_identical(calcNormFactors_parallel(cts, workers = 2L, chunks = 1L, parallel_backend = spy),
                    ref)
   expect_identical(sizes, list(rep(1L, S), rep(1L, S)))

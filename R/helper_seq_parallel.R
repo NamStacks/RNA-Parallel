@@ -1020,7 +1020,8 @@ rp_host_cores <- function() {
 
 #' The smallest CPU allocation the environment declares, or NA when none is declared
 #'
-#' `SLURM_CPUS_PER_TASK`, `NSLOTS` (SGE), `PBS_NUM_PPN`, `LSB_DJOB_NUMPROC` (LSF), then the
+#' `SLURM_CPUS_PER_TASK`, `NSLOTS` (SGE), `PBS_NUM_PPN`, `LSB_DJOB_NUMPROC` (LSF), inside a Slurm
+#' job also `SLURM_CPUS_ON_NODE` and `SLURM_JOB_CPUS_PER_NODE` (leading integer), then the
 #' cgroup CPU quota (`cpu.max` on v2, `cpu.cfs_quota_us` over `cpu.cfs_period_us` on v1),
 #' rounded up and read along the same ancestor walk as the memory limit. `options(mc.cores)`
 #' is left out on purpose: it is `mclapply`'s per-call default, which users set to 2 in
@@ -1030,6 +1031,11 @@ rp_host_cores <- function() {
 rp_cpu_limit <- function(proc = "/proc/self/cgroup", root = "/sys/fs/cgroup") {
   v <- suppressWarnings(as.numeric(
     Sys.getenv(c("SLURM_CPUS_PER_TASK", "NSLOTS", "PBS_NUM_PPN", "LSB_DJOB_NUMPROC"), NA)))
+# A Slurm job without --cpus-per-task sets only the node-level counts, "4" or "4(x2)", so the leading integer is the allocation.
+  if (nzchar(Sys.getenv("SLURM_JOB_ID"))) {
+    sn <- Sys.getenv(c("SLURM_CPUS_ON_NODE", "SLURM_JOB_CPUS_PER_NODE"), NA)
+    v <- c(v, suppressWarnings(as.numeric(sub("[(,].*$", "", sn))))
+  }
   g <- rp_cgroup_dirs("cpu", proc, root)
   if (!is.null(g)) {
     for (d in g$dirs) {
@@ -1046,7 +1052,7 @@ rp_cpu_limit <- function(proc = "/proc/self/cgroup", root = "/sys/fs/cgroup") {
     }
   }
   v <- v[is.finite(v) & v >= 1]
-  if (length(v)) as.integer(min(v)) else NA_integer_
+  if (length(v)) as.integer(min(v, .Machine$integer.max)) else NA_integer_
 }
 
 #' Performance cores, distinguished from total cores on a hybrid CPU
@@ -1551,7 +1557,8 @@ rp_relay <- function(parts) {
 #' `outfile`, BiocParallel drops them, and only future relays them. So every job runs under
 #' [rp_hold()], which keeps its warnings and messages in order and muffles them before any
 #' backend sees them, and the master raises them again in chunk order: the same sequence on
-#' every backend, once each. Messages get the same treatment as warnings for that reason; a
+#' every backend, once each. On a failed dispatch only the failing chunks' conditions are raised.
+#' Messages get the same treatment as warnings for that reason; a
 #' caller's `suppressMessages()` could not reach a message printed by a forked child. A
 #' `rp_note_fallback()` a job records lands in the worker's own copy of the counters, so the job
 #' also returns the notes it added and the master records them.
@@ -1560,7 +1567,8 @@ combat_parallel_lapply <- function(idx, f, workers,
                                    parallel_backend = getOption("combat.backend", combat_default_backend()),
                                    cells = Inf,
                                    min_cells = getOption("combat.min.cells", 2e4),
-                                   preschedule = FALSE, relay = TRUE, payload = NULL) {
+                                   preschedule = FALSE, relay = TRUE, payload = NULL,
+                                   what = "dispatch") {
   # `f` is evaluated on every path this function has, but not until a worker touches it, and
   # until then it is a promise. serialize() writes a promise together with its PRENV, so each
   # dispatched task carried the caller's evaluation frame, that frame's own unforced promises,
@@ -1595,10 +1603,18 @@ combat_parallel_lapply <- function(idx, f, workers,
   arg <- if (is.null(payload)) idx else payload
   in_master <- function() {
     if (relay) return(withCallingHandlers(lapply(arg, f), error = rp_relay_on_error))
-    h <- rp_hold(lapply(arg, f))
+    h <- withCallingHandlers(rp_hold(lapply(arg, f)), error = rp_relay_on_error)
     structure(h$value, rp_relay = list(conds = h$conds))
   }
-  done <- function(res) if (relay) rp_relay(res) else res
+# A failed dispatch raises only the failing chunks' conditions, from combat_parallel_check(), as the backends that throw do; chunks the original would never have reached stay silent.
+  done <- function(res) {
+    if (!relay) return(res)
+    if (any(vapply(res, function(p) is.null(p) || inherits(p, c("try-error", "condition")), NA))) {
+      attr(res, "rp_relay") <- NULL
+      return(res)
+    }
+    rp_relay(res)
+  }
 
   # Validate BEFORE the size gate, or validation becomes size-dependent: a misspelled
   # backend name would be refused on a big matrix and silently accepted on a small one.
@@ -1733,7 +1749,11 @@ combat_parallel_lapply <- function(idx, f, workers,
     fb0 <- .rp_dispatch$fallback
     .rp_dispatch$fallback <- character()
     on.exit(.rp_dispatch$fallback <- union(fb0, .rp_dispatch$fallback), add = TRUE)
-    h <- rp_hold(f(ii))
+    h <- withCallingHandlers(rp_hold(f(ii)), error = function(e) {
+      e$rp_chunk <- k
+      e$rp_class <- class(e)
+      stop(e)
+    })
     list(combat_chunk = k, value = h$value, conds = h$conds, fallback = .rp_dispatch$fallback)
   }
   environment(f_tagged) <- .lean_tag
@@ -1796,7 +1816,7 @@ combat_parallel_lapply <- function(idx, f, workers,
     on.exit(rp_reporter_stop(.rp_rep), add = TRUE)
     .rp_rep <- rp_reporter_start(.lean_tag$progress_dir)
     rp_count(TRUE)
-    out <- parallel_backend(idx_tagged, f_tagged, workers)
+    out <- rp_backend_guard(parallel_backend(idx_tagged, f_tagged, workers), length(idx), what)
     if (!is.list(out) || length(out) != length(idx)) {
       stop("a custom parallel_backend must return a list of length ", length(idx),
            ", in the order of `idx`; got ", class(out)[1], " of length ", length(out),
@@ -1821,6 +1841,15 @@ combat_parallel_lapply <- function(idx, f, workers,
   one_process <- parallel_backend == "future" &&
     (future::nbrOfWorkers() < 2L ||
        (inherits(future::plan(), "multicore") && !future::supportsMulticore()))
+# Before the reporter starts, because mclapply with one core runs plain lapply in this process, outside every error path below, and nothing would write progress for a watcher to show.
+  chk <- Sys.getenv("_R_CHECK_LIMIT_CORES_", "")
+  check_cap <- if (nzchar(chk) && !identical(tolower(chk), "false")) 2L else Inf
+  cores_cap <- as.integer(min(check_cap, rp_host_cores()))
+  ncore <- min(workers, length(idx), cores_cap)
+  if (parallel_backend == "mclapply" && ncore < 2L) {
+    rp_count(FALSE)
+    return(in_master())
+  }
   # The bar has to be rendered by something that is not the master, because from here to the end
   # of the dispatch the master is inside the backend and runs no R code. Started and stopped in
   # this function so it never survives into combat_reap's view of stray children.
@@ -1836,7 +1865,6 @@ combat_parallel_lapply <- function(idx, f, workers,
   # why this cap has to exist rather than trusting detectCores(). It only started
   # mattering once the test suite began actually forking; before that no test reached
   # a worker at all, so check passed while proving nothing.
-  chk <- Sys.getenv("_R_CHECK_LIMIT_CORES_", "")
   # Past the performance-core count each added worker returns less throughput than the one
   # before it, so more workers can be slower rather than faster. Not a core-type effect: forks
   # migrate across the performance and efficiency clusters, and eight children given identical
@@ -1848,12 +1876,6 @@ combat_parallel_lapply <- function(idx, f, workers,
 
 # Memoised, because both branches spawn a process on macOS, about 10 ms each, and the core count does not change mid-session.
   perf <- rp_perf_cores()
-
-  # Memoised for the same reason as perf: detectCores() spawns a process on macOS, measured
-  # 13 ms, and this ran on every forking dispatch on every backend.
-  check_cap <- if (nzchar(chk) && !identical(tolower(chk), "false")) 2L else Inf
-  cores_cap <- as.integer(min(check_cap, rp_host_cores()))
-  ncore <- min(workers, length(idx), cores_cap)
 
 # The note fires only for a backend that hands each worker a serialized copy of the job, which includes a MulticoreParam once started (only in a session with attached children), because a worker that shares the parent's pages still adds throughput on an efficiency core (5.43x at eight workers on four performance cores).
   if ((!rp_copy_free(parallel_backend) || (parallel_backend == "BiocParallel" && length(combat_children()))) && ncore > perf &&
@@ -1892,7 +1914,8 @@ combat_parallel_lapply <- function(idx, f, workers,
         parallel::mclapply(idx_tagged, f_tagged, mc.cores = ncore,
                            mc.preschedule = preschedule, mc.allow.recursive = FALSE),
         warning = function(w) {
-          if (grepl("function calls? resulted in an error|encountered errors? in user code",
+          if (grepl(paste0("function calls? resulted in an error|encountered errors? in user code|",
+                           "did not deliver (a )?results?|", rp_lost_result_re()),
                     conditionMessage(w))) {
             invokeRestart("muffleWarning")
           }
@@ -1914,9 +1937,11 @@ combat_parallel_lapply <- function(idx, f, workers,
       # ran six workers however small `workers` was. Chunking the jobs caps the number of
       # futures in flight at `ncore`, which is the only lever this backend gives us without
       # rewriting the caller's plan.
-      untag(rp_backend_guard(future.apply::future_lapply(
-        idx_tagged, f_tagged, future.seed = NULL,
-        future.chunk.size = ceiling(length(idx) / ncore)), length(idx)))
+      untag(rp_backend_guard(
+        future.apply::future_lapply(
+          idx_tagged, f_tagged, future.seed = NULL,
+          future.chunk.size = ceiling(length(idx) / ncore)),
+        length(idx), what))
     },
 
     BiocParallel = {
@@ -1935,10 +1960,10 @@ combat_parallel_lapply <- function(idx, f, workers,
       bp <- BiocParallel::MulticoreParam(workers = ncore, stop.on.error = FALSE, RNGseed = NULL)
       if (length(combat_children())) {
         BiocParallel::bpstart(bp)
-        on.exit(BiocParallel::bpstop(bp), add = TRUE, after = FALSE)
+        on.exit(try(BiocParallel::bpstop(bp), silent = TRUE), add = TRUE, after = FALSE)
       }
       untag(rp_backend_guard(BiocParallel::bplapply(idx_tagged, f_tagged, BPPARAM = bp),
-                             length(idx)))
+                             length(idx), what, infra = TRUE))
     },
 
     foreach = {
@@ -1992,8 +2017,9 @@ combat_parallel_lapply <- function(idx, f, workers,
       # made each worker retain its whole group's results, and clamped a remote backend to
       # this machine's core count. A backend the caller registered is theirs: its width
       # governs, `workers` does not, and that is documented rather than silently enforced.
-      out <- foreach::foreach(i = idx_tagged, .packages = "edgeR",
-                              .errorhandling = "pass") %dopar% f_tagged(i)
+      out <- rp_backend_guard(
+        foreach::foreach(i = idx_tagged, .packages = "edgeR", .errorhandling = "pass") %dopar%
+          f_tagged(i), length(idx), what, infra = TRUE)
 # doParallel parks each dispatch's export environment on every worker, pinning its payload in an idle cached pool, and it is dropped only after a normal return because after an interrupt clusterCall waits for every busy worker.
       if (own_backend) finished <- TRUE
       if (own_backend) try(parallel::clusterCall(cl, rp_drop_exportenv), silent = TRUE)
@@ -2089,34 +2115,108 @@ rp_relay_on_error <- function(e) {
   stop(e)
 }
 
+#' Regex for the missing-result warnings of the fork and BiocParallel executors, English and translated
+#' @noRd
+rp_lost_result_re <- function() {
+  ids <- list(c("%d parallel function call did not deliver a result",
+                "%d parallel function calls did not deliver results"),
+              c("%d parallel job did not deliver a result", "%d parallel jobs did not deliver results"),
+              "%d function calls resulted in an error",
+              "all scheduled cores encountered errors in user code",
+              c("scheduled core %s did not deliver a result, all values of the job will be affected",
+                "scheduled cores %s did not deliver results, all values of the jobs will be affected"),
+              c("scheduled core %s encountered error in user code, all values of the job will be affected",
+                "scheduled cores %s encountered errors in user code, all values of the jobs will be affected"))
+  forms <- unique(unlist(lapply(ids, function(id) {
+    c(id, if (length(id) == 2L) {
+      vapply(1:2, function(n) ngettext(n, id[1L], id[2L], domain = "R-parallel"), "")
+    } else gettext(id, domain = "R-parallel"))
+  })))
+  paste0(gsub("%[ds]", ".+", gsub("([][{}()*+?.\\\\^$|])", "\\\\\\1", forms)), collapse = "|")
+}
+
 #' Give a future or BiocParallel dispatch failure the same class the other backends raise
 #'
-#' Those two rethrow the worker's error instead of returning it to `combat_parallel_check()`.
+#' These backends (future, BiocParallel, a dead foreach worker, a custom executor) rethrow the error
+#' instead of returning it to `combat_parallel_check()`.
 #' The error leaves with `rnaparallel_dispatch_error` ahead of its own classes, its own message
 #' and call, and the first original condition as `cause`, so `tryCatch` on either class still
 #' matches. BiocParallel wraps every failed task in one `bplist_error`; its `n_errored` counts
 #' those tasks and its `cause` is the first task's error.
 #' @param expr The backend call.
 #' @param n_chunks Number of chunks dispatched.
+#' @param what The stage label for `stage`.
+#' @param infra TRUE when this backend never throws a task's own error, so an error that gets
+#'   here and reads as a lost connection or worker (not a `bplist_error`) means a worker died.
 #' @noRd
-rp_backend_guard <- function(expr, n_chunks) {
-  tryCatch(expr, error = function(e) {
+rp_backend_guard <- function(expr, n_chunks, what = "dispatch", infra = FALSE) {
+# The dispatch error is the single report, so future.apply's cancel message and the missing-result warning of mclapply-style executors are dropped on every route through here.
+  tryCatch(withCallingHandlers(
+    expr,
+    warning = function(w) {
+      if (grepl(paste0("did not deliver (a )?results?|", rp_lost_result_re()), conditionMessage(w))) {
+        invokeRestart("muffleWarning")
+      }
+    },
+    message = function(m) {
+      if (grepl("^Caught .*\\. Canceling all iterations", conditionMessage(m))) {
+        invokeRestart("muffleMessage")
+      }
+    }), error = function(e) {
     if (inherits(e, "rnaparallel_dispatch_error")) stop(e)
     rp_relay_held(list(e))
     failed <- if (inherits(e, "bplist_error")) {
       Filter(function(r) inherits(r, "error"), attr(e, "result"))
     }
+# A death needs positive evidence: a FutureError other than a launch or eval failure, or with infra a message, English or translated, that names a lost connection or BiocParallel's subassignment failure; any other error stays a plain error.
+    lost <- c("error reading from connection", "error writing to connection",
+              "wrong args for environment subassignment")
+    died <- inherits(e, "FutureInterruptError") ||
+      (inherits(e, "FutureError") && !inherits(e, c("FutureLaunchError", "FutureEvalError"))) ||
+      (infra && !inherits(e, "bplist_error") &&
+         any(vapply(unique(c(lost, gettext(lost, domain = "R"))), grepl, NA,
+                    x = conditionMessage(e), fixed = TRUE)))
     out <- e
-    out$message <- paste(c(conditionMessage(e), rp_dispatch_diagnosis(conditionMessage(e), 1L)[-1L]),
-                         collapse = " ")
-    out$stage <- NA_character_
+    out$message <- if (died) {
+      paste(c(rp_died_msg(1L), conditionMessage(e),
+              rp_dispatch_diagnosis(conditionMessage(e), 1L)[-1L]), collapse = " ")
+    } else {
+      paste(c(conditionMessage(e), rp_dispatch_diagnosis(conditionMessage(e), 1L)[-1L]),
+            collapse = " ")
+    }
+    out$rp_held <- NULL
+    out$stage <- what
     out$n_chunks <- n_chunks
-    out$n_errored <- max(1L, length(failed))
-    out$n_died <- 0L
-    out$cause <- if (length(failed)) failed[[1L]] else e
+    out$n_errored <- if (died) 0L else max(1L, length(failed))
+    out$n_died <- as.integer(died)
+    out$cause <- rp_clean_cause(if (length(failed)) failed[[1L]] else e)
+    out$rp_class <- NULL
+    out$rp_chunk <- NULL
     class(out) <- c("rnaparallel_dispatch_error", class(e))
     stop(out)
   })
+}
+
+#' The sentence for chunks whose worker process vanished
+#' @param n Number of chunks.
+#' @noRd
+rp_died_msg <- function(n) {
+  sprintf("%d chunk(s) returned NULL, meaning the worker process died. %s", n,
+          "That is almost always the kernel killing it for memory: lower `workers`, raise `chunks`, or set options(combat.fork = FALSE).")
+}
+
+#' An original condition as the worker raised it
+#'
+#' Puts back the class a backend's wrapper replaced (BiocParallel's `remote_error`) and drops the
+#' fields the dispatch added.
+#' @param cond A condition.
+#' @noRd
+rp_clean_cause <- function(cond) {
+  if (!is.null(cond$rp_class)) class(cond) <- cond$rp_class
+  cond$rp_class <- NULL
+  cond$rp_chunk <- NULL
+  cond$rp_held <- NULL
+  cond
 }
 
 #' Check worker results and fail with the real cause
@@ -2171,21 +2271,23 @@ combat_parallel_check <- function(parts, what, idx = NULL) {
 
   msg <- character(0)
   if (any(died)) {
-    msg <- c(msg, sprintf("%d chunk(s) returned NULL, meaning the worker process died. %s",
-                          sum(died),
-                          "That is almost always the kernel killing it for memory: lower `workers`, raise `chunks`, or set options(combat.fork = FALSE)."))
+    msg <- c(msg, rp_died_msg(sum(died)))
   }
+# A prescheduled mclapply core hands its one try-error to every chunk it held, so copies carrying the same chunk number are one failed chunk.
+  ec <- list()
   if (any(errored)) {
-    texts <- vapply(parts[errored], function(p) {
-      cond <- if (inherits(p, "condition")) p else attr(p, "condition")
-      if (is.null(cond)) "no condition attached" else conditionMessage(cond)
+    ec <- lapply(parts[errored], function(p) {
+      if (inherits(p, "condition")) p else attr(p, "condition")
+    })
+    key <- vapply(ec, function(cn) if (is.null(cn$rp_chunk)) NA_integer_ else as.integer(cn$rp_chunk), 1L)
+    ec <- ec[is.na(key) | !duplicated(key)]
+    texts <- vapply(ec, function(cn) {
+      if (is.null(cn)) "no condition attached" else conditionMessage(cn)
     }, character(1))
-    msg <- c(msg, rp_dispatch_diagnosis(texts, sum(errored)))
+    msg <- c(msg, rp_dispatch_diagnosis(texts, length(ec)))
   }
 
-  conds_err <- Filter(Negate(is.null), lapply(parts[errored], function(p) {
-    if (inherits(p, "condition")) p else attr(p, "condition")
-  }))
+  conds_err <- Filter(Negate(is.null), ec)
   rp_relay_held(conds_err)
 
   # A condition class lets a caller branch on structure instead of regexing prose, which is
@@ -2194,8 +2296,8 @@ combat_parallel_check <- function(parts, what, idx = NULL) {
     class = c("rnaparallel_dispatch_error", "error", "condition"),
     list(message = paste0(what, ": ", paste(msg, collapse = " ")), call = NULL,
          stage = what, n_chunks = length(parts),
-         n_errored = sum(errored), n_died = sum(died),
-         cause = if (length(conds_err)) conds_err[[1L]])))
+         n_errored = length(ec), n_died = sum(died),
+         cause = if (length(conds_err)) rp_clean_cause(conds_err[[1L]]))))
 }
 
 
@@ -2326,7 +2428,8 @@ glmFit_rows_parallel <- function(y, design, dispersion, offset, weights = NULL,
 
   fits <- combat_parallel_check(
     combat_parallel_lapply(idx, fit_rows, workers, parallel_backend, cells = length(y),
-                           min_cells = getOption("combat.min.glm.cells", 1e5), relay = FALSE),
+                           min_cells = getOption("combat.min.glm.cells", 1e5), relay = FALSE,
+                           what = "glmFit_rows_parallel"),
     "glmFit_rows_parallel", idx)
 
   # A gene whose fit failed carries state from the block it sat in, so one failure anywhere
@@ -2608,7 +2711,8 @@ match_quantiles_parallel <- function(mq, counts_sub, old_mu, old_phi, new_mu, ne
   environment(do_rows) <- .lean
 
   parts <- combat_parallel_check(
-    combat_parallel_lapply(idx, do_rows, workers, parallel_backend, cells = length(counts_sub)),
+    combat_parallel_lapply(idx, do_rows, workers, parallel_backend, cells = length(counts_sub),
+                           what = "match_quantiles_parallel"),
     "match_quantiles_parallel", idx)
   # Fused bind+reorder: preallocate the output once and scatter each chunk straight into its
   # final row positions (`m[idx[[k]], ] <- parts[[k]]`), instead of `do.call(rbind, parts)`
@@ -2776,7 +2880,8 @@ estimateGLMTagwiseDisp_rows_parallel <- function(y, design = NULL, dispersion = 
   # returns 0.65x at 10,000 cells, 0.79x at 20,000, 1.08x at 30,000 and 1.44x at 50,000
   parts <- combat_parallel_check(
     combat_parallel_lapply(idx, disp_rows, workers, parallel_backend, cells = length(y),
-                           min_cells = getOption("combat.min.disp.cells", 3e4), relay = FALSE),
+                           min_cells = getOption("combat.min.disp.cells", 3e4), relay = FALSE,
+                           what = "estimateGLMTagwiseDisp_rows_parallel"),
     "estimateGLMTagwiseDisp_rows_parallel", idx)
   out <- unlist(parts, use.names = FALSE)[combat_row_order(idx)]
 

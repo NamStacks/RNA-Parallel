@@ -228,6 +228,11 @@ test_that("the break-even gates follow the backend's copy behavior, not the OS",
   })
 })
 
+# Without fork() the unset least-squares and weighted gates are Inf, so a default-gate dispatch opens (1) only where a worker inherits the matrix.
+default_opens <- function() {
+  if (rnaparallel:::rp_copy_free(function(idx, f, workers) lapply(idx, f))) 1L else 0L
+}
+
 gate_count <- function(option, run) {
   withr::local_options(structure(list(NULL), names = option))
   withr::local_options(combat.mem.guard = FALSE)
@@ -257,7 +262,7 @@ test_that("combat.min.cells opens at its default on the quantile match and the w
     des <- cbind(1, rep(0:1, length.out = n))
     function(b) lmFit_parallel(M, des, weights = W, workers = 2L, chunks = 2L, parallel_backend = b)
   }
-  expect_identical(gate_count("combat.min.cells", wls(1000L, 20L)), 1L)
+  expect_identical(gate_count("combat.min.cells", wls(1000L, 20L)), default_opens())
   expect_identical(gate_count("combat.min.cells", wls(999L, 20L)), 0L)
 })
 
@@ -285,7 +290,8 @@ test_that("unweighted and array-weighted lmFit stay shut under combat.min.ls.cel
   withr::local_options(combat.min.ls.cells = NULL, combat.min.wt.genes = 0)
   expect_identical(gate_count("combat.min.cells", fit(NULL)), 0L)
   expect_identical(gate_count("combat.min.cells", fit(runif(24, 0.5, 2))), 0L)
-  expect_identical(gate_count("combat.min.cells", fit(matrix(runif(1000 * 24, 0.5, 2), 1000, 24))), 1L)
+  expect_identical(gate_count("combat.min.cells", fit(matrix(runif(1000 * 24, 0.5, 2), 1000, 24))),
+                   default_opens())
 })
 
 test_that("combat.min.disp.cells opens at its default on the tagwise row split", {

@@ -144,7 +144,10 @@ test_that("combat_kill_handles stops a busy socket worker through its ps handle"
   skip_on_cran()
   skip_if_not_installed("ps")
   cl <- parallel::makeCluster(1L, type = "PSOCK")
-  withr::defer(try(suppressWarnings(parallel::stopCluster(cl)), silent = TRUE))
+  withr::defer({
+    try(suppressWarnings(parallel::stopCluster(cl)), silent = TRUE)
+    for (node in cl) try(close(node$con), silent = TRUE)
+  })
   pid <- parallel::clusterCall(cl, Sys.getpid)[[1L]]
   h <- ps::ps_handle(pid)
   utils::getFromNamespace("sendCall", "parallel")(cl[[1L]], function() Sys.sleep(60), list())
@@ -257,7 +260,8 @@ rh_cores_memo <- function(detected = NULL, env = parent.frame()) {
 
 rh_no_alloc <- function(host = FALSE, env = parent.frame()) {
   withr::local_envvar(c(MC_CORES = NA, SLURM_CPUS_PER_TASK = NA, NSLOTS = NA, PBS_NUM_PPN = NA,
-                        LSB_DJOB_NUMPROC = NA), .local_envir = env)
+                        LSB_DJOB_NUMPROC = NA, SLURM_JOB_ID = NA, SLURM_CPUS_ON_NODE = NA,
+                        SLURM_JOB_CPUS_PER_NODE = NA), .local_envir = env)
   withr::local_options(mc.cores = NULL, .local_envir = env)
   if (host) {
     testthat::skip_if(!is.na(rnaparallel:::rp_cpu_limit()),
@@ -456,4 +460,56 @@ test_that("rp_darwin_fast_cores counts every performance tier above the efficien
   expect_identical(rnaparallel:::rp_darwin_fast_cores(fake(list())), NA_integer_)
   gap <- list(hw.nperflevels = "3", hw.perflevel0.physicalcpu = "2")
   expect_identical(rnaparallel:::rp_darwin_fast_cores(fake(gap)), NA_integer_)
+})
+
+
+# ---- second review round ---------------------------------------------------------------
+
+test_that("rp_cpu_limit reads a Slurm allocation made without --cpus-per-task", {
+  none <- rh_tree(list("cpu.max" = "max 100000"))
+  rh_no_alloc()
+  withr::local_envvar(c(SLURM_JOB_ID = "1", SLURM_CPUS_ON_NODE = NA, SLURM_JOB_CPUS_PER_NODE = NA))
+  expect_identical(rnaparallel:::rp_cpu_limit(rh_proc("0::/"), none), NA_integer_)
+  withr::local_envvar(c(SLURM_CPUS_ON_NODE = "4"))
+  expect_identical(rnaparallel:::rp_cpu_limit(rh_proc("0::/"), none), 4L)
+  withr::local_envvar(c(SLURM_CPUS_ON_NODE = NA, SLURM_JOB_CPUS_PER_NODE = "6(x2)"))
+  expect_identical(rnaparallel:::rp_cpu_limit(rh_proc("0::/"), none), 6L)
+  withr::local_envvar(c(SLURM_CPUS_PER_TASK = "2"))
+  expect_identical(rnaparallel:::rp_cpu_limit(rh_proc("0::/"), none), 2L)
+  withr::local_envvar(c(SLURM_JOB_ID = NA, SLURM_CPUS_PER_TASK = NA))
+  expect_identical(rnaparallel:::rp_cpu_limit(rh_proc("0::/"), none), NA_integer_)
+})
+
+test_that("rp_cpu_limit with an allocation beyond integer range warns nothing and reads as no limit or the cap", {
+  none <- rh_tree(list("cpu.max" = "max 100000"))
+  rh_no_alloc()
+  withr::local_envvar(c(SLURM_CPUS_PER_TASK = "2147483648"))
+  expect_no_warning(got <- rnaparallel:::rp_cpu_limit(rh_proc("0::/"), none))
+  expect_identical(got, .Machine$integer.max)
+})
+
+test_that("a killed foreach or BiocParallel worker raises the dispatch error, counted as a death", {
+  skip_on_cran()
+  skip_on_os("windows")
+  skip_if_not_installed("doParallel")
+  skip_if_not_installed("BiocParallel")
+  skip_if(rnaparallel:::rp_host_cores() < 2L, "the dispatch needs 2 allowed cores to fork")
+  for (be in c("foreach", "BiocParallel")) {
+    out <- rh_rscript(c(
+      "f <- function(ii) { Sys.sleep(0.3); if (ii == 2L) tools::pskill(Sys.getpid(), tools::SIGKILL); ii }",
+      "environment(f) <- baseenv()",
+      "w <- character()",
+      paste0("e <- withCallingHandlers(tryCatch(rnaparallel:::combat_parallel_lapply(as.list(1:4), f, ",
+             "2L, '", be, "', cells = Inf, min_cells = 0), error = function(e) e), ",
+             "warning = function(x) { w <<- c(w, conditionMessage(x)); invokeRestart('muffleWarning') })"),
+      "cat('\\nCLASS', class(e)[1L], '\\n')",
+      "cat('DIED', e$n_died, e$n_errored, '\\n')",
+      "cat('WARN', sum(grepl('did not deliver', w)), '\\n')",
+      "rnaparallel::combat_cluster_stop()"), timeout = 60)
+    info <- paste(be, paste(tail(out, 6), collapse = "\n"))
+    expect_match(grep("^CLASS ", out, value = TRUE), "rnaparallel_dispatch_error", fixed = TRUE,
+                 info = info)
+    expect_match(grep("^DIED ", out, value = TRUE), "^DIED 1 0 *$", info = info)
+    expect_match(grep("^WARN ", out, value = TRUE), "^WARN 0 *$", info = info)
+  }
 })

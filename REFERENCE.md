@@ -526,7 +526,8 @@ call on every platform. The package never sets a plan itself; a plan you set is 
 
 **Workers** default to `min(8, detectCores() - 2)`. Inside a scheduler job or a container the
 allocation replaces the machine's core count: the smallest of `SLURM_CPUS_PER_TASK`, `NSLOTS`,
-`PBS_NUM_PPN`, `LSB_DJOB_NUMPROC` and the cgroup CPU quota, when any is set, and the default is
+`PBS_NUM_PPN`, `LSB_DJOB_NUMPROC`, inside a Slurm job `SLURM_CPUS_ON_NODE` or
+`SLURM_JOB_CPUS_PER_NODE`, and the cgroup CPU quota, when any is set, and the default is
 then `min(8, allocation)`, since those cores are already reserved for the job. The same number
 caps how many workers one dispatch starts. The scheduler variables are read on every call.
 On Windows that is capped again at the

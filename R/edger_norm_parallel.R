@@ -248,16 +248,16 @@ rp_rank_once <- function(rank0) {
 #'
 #' TRUE only where the payload is serialized per task and the dispatch will leave this process:
 #' a copy-free backend (fork) reads the master's pages and keeps the whole-matrix closure, and a
-#' dispatch under the size gate, the `serial` backend, one worker or `combat.fork = FALSE` runs
+#' dispatch under the size gate, the `serial` backend, one worker, one chunk or `combat.fork = FALSE` runs
 #' in the master, where slicing would only add a copy. So does every dispatch that
 #' `combat_parallel_lapply()` itself keeps in this process: a nested call inside one of its own
 #' workers, `mclapply` inside a fork, `mclapply` or `BiocParallel` on Windows, and a `future`
 #' plan that resolves in one process. A started BiocParallel param copies although
 #' `rp_copy_free()` answers TRUE for it.
 #' @noRd
-rp_ship_slices <- function(parallel_backend, workers, cells, min_cells) {
+rp_ship_slices <- function(parallel_backend, workers, cells, min_cells, nchunks = Inf) {
   mc <- suppressWarnings(as.numeric(min_cells))
-  if (isTRUE(cells < mc) || !isTRUE(workers > 1L)) return(FALSE)
+  if (isTRUE(cells < mc) || !isTRUE(workers > 1L) || !isTRUE(nchunks > 1L)) return(FALSE)
   if (!isTRUE(getOption("combat.fork", TRUE)) || identical(parallel_backend, "serial")) {
     return(FALSE)
   }
@@ -279,6 +279,13 @@ rp_ship_slices <- function(parallel_backend, workers, cells, min_cells) {
   }
   !rp_copy_free(parallel_backend) ||
     (identical(parallel_backend, "BiocParallel") && length(combat_children()) > 0L)
+}
+
+#' How many column chunks `rp_norm_cols()` will cut
+#' @noRd
+rp_norm_nchunks <- function(ncols, cells, workers, chunks) {
+  length(combat_row_chunks(ncols, workers = workers, chunks = chunks,
+                           ncol = if (ncols > 0) cells / ncols else NULL))
 }
 
 #' Dispatch a per-column function across column chunks
@@ -308,7 +315,7 @@ rp_norm_cols <- function(ncols, cells, f, workers, chunks, parallel_backend, min
   payload <- if (is.null(slice)) NULL else lapply(idx, slice)
   parts <- combat_parallel_check(
     combat_parallel_lapply(idx, f, workers, parallel_backend, cells = cells,
-                           min_cells = min_cells, payload = payload),
+                           min_cells = min_cells, payload = payload, what = what),
     what, idx)
   out <- unlist(parts)                     # names kept: apply() names RLE from colnames
   if (length(out) != ncols) {
@@ -399,7 +406,8 @@ rp_factor_shim <- function(vfun, loopvar, workers, chunks, parallel_backend, wha
       # forking backend this is invisible either way (the child inherits the pages), so the
       # cost was only ever paid where there is no fork(). Nothing about the arithmetic changes.
       min_cells <- rp_norm_min_cells(parallel_backend)
-      ship <- rp_ship_slices(parallel_backend, workers, length(fx), min_cells)
+      ship <- rp_ship_slices(parallel_backend, workers, length(fx), min_cells,
+                             rp_norm_nchunks(ncol(fx), length(fx), workers, chunks))
       lean <- new.env(parent = rp_home())
       lean$ref <- ref
       lean$libsize.ref <- libsize.ref; lean$vfun <- vfun
@@ -492,7 +500,8 @@ rp_quantile_shim <- function(q0, loopvar, workers, chunks, parallel_backend) {
       # own call frame, and `got`, a second copy of the matrix, neither of which the body
       # reads. On a socket backend all of it would be serialized per chunk.
       min_cells <- rp_order_min_cells(parallel_backend)
-      ship <- rp_ship_slices(parallel_backend, workers, length(fdata), min_cells)
+      ship <- rp_ship_slices(parallel_backend, workers, length(fdata), min_cells,
+                             rp_norm_nchunks(ncol(fdata), length(fdata), workers, chunks))
       lean <- new.env(parent = rp_home())
       lean$q0 <- q0; lean$probs <- probs; lean$dots <- dots
       slice <- NULL
@@ -556,15 +565,18 @@ rp_apply_shim <- function(apply0, workers, chunks, parallel_backend) {
 # X, MARGIN and FUN go by exact name so an extra argument cannot partial-match one of them.
     min_cells <- rp_order_min_cells(parallel_backend)
     slice <- NULL
-# Sliced only when FUN reads nothing from its frame but the pooled gm, because FUN is re-parented to an environment holding just that.
+# Sliced only for edgeR's stock per-column closure, whose body reads nothing but u and gm, so rebuilding its environment around gm alone cannot change what it computes; any other FUN keeps the frame.
     fenv <- tryCatch(environment(FUN), error = function(e) NULL)
-    free <- setdiff(unique(c(all.names(body(FUN)),
-                             all.names(as.call(c(quote(list), formals(FUN)))))),
-                    names(formals(FUN)))
     only_gm <- has_data && is.environment(fenv) && exists("gm", envir = fenv, inherits = FALSE) &&
-      identical(intersect(free, ls(fenv, all.names = TRUE)), "gm")
-    if (only_gm && rp_ship_slices(parallel_backend, workers, length(X), min_cells)) {
-      genv <- new.env(parent = topenv(fenv))
+      identical(deparse(body(FUN)), "median((u/gm)[gm > 0])") &&
+      identical(names(formals(FUN)), "u") &&
+      setequal(ls(fenv, all.names = TRUE), c("data", "gm"))
+    if (only_gm && rp_ship_slices(parallel_backend, workers, length(X), min_cells,
+                                  rp_norm_nchunks(ncol(X), length(X), workers, chunks))) {
+# The chain above the frame stays as it was, minus the environment holding this `apply` shim, whose frame holds the dispatch, so S3 methods, string lookups and parent.env() reads reach what they did serially.
+      up <- parent.env(fenv)
+      if (identical(get0("apply", envir = up, inherits = FALSE), sys.function())) up <- parent.env(up)
+      genv <- new.env(parent = up)
       genv$gm <- get("gm", envir = fenv, inherits = FALSE)
       FUN2 <- FUN
       environment(FUN2) <- genv
@@ -731,8 +743,10 @@ rp_dge_fwd <- function(sc, own, m, caller, fallback) {
 #'   [combat_backends()].
 #' @param chunks Column chunks per dispatch. Defaults to `workers`; passing `chunks = workers` explicitly is redundant.
 #' @param parallel_backend One of [combat_backends()], or a function
-#'   `function(idx, f, workers)` returning a list in the order of `idx`. Defaults to
-#'   `getOption("combat.backend", combat_default_backend())`.
+#'   `function(idx, f, workers)` returning a list in the order of `idx`. Treat the
+#'   elements of `idx` as opaque and pass each to `f`: where the function's workers do not
+#'   share this process's memory, each element is that chunk's own columns rather than an
+#'   index vector. Defaults to `getOption("combat.backend", combat_default_backend())`.
 #' @param backend Optional edgeR default normalization method to wrap. Defaults to
 #'   `normLibSizes.default` when available, with the older name as a fallback.
 #'

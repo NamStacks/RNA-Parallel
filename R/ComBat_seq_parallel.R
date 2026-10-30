@@ -331,7 +331,8 @@ ComBat_seq_parallel <- function(counts, batch, group = NULL, covar_mod = NULL,
                              # one scalar per batch, and batch counts exceed worker counts on
                              # real designs, so one fork per worker beats one fork per batch.
                              # Measured at 100 batches: 1428 ms to 1063 ms.
-                             preschedule = TRUE, relay = FALSE),
+                             preschedule = TRUE, relay = FALSE,
+                             what = "estimateGLMCommonDisp across batches"),
       "estimateGLMCommonDisp across batches", as.list(X))
 
     out <- unlist(parts, use.names = FALSE)
@@ -377,7 +378,8 @@ ComBat_seq_parallel <- function(counts, batch, group = NULL, covar_mod = NULL,
     parts <- combat_parallel_check(
       combat_parallel_lapply(as.list(X), batch_job(lean_fun(FUN), ...), workers,
                              parallel_backend, cells = .cells,
-                             min_cells = getOption("combat.min.batch.cells", 2e4), relay = FALSE),
+                             min_cells = getOption("combat.min.batch.cells", 2e4), relay = FALSE,
+                             what = "estimateGLMTagwiseDisp across batches"),
 # No idx, because one batch returns a dispersion per gene rather than per index, so the shape is checked below instead.
       "estimateGLMTagwiseDisp across batches")
 

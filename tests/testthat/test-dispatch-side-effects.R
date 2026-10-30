@@ -1,6 +1,14 @@
-rp_os_children <- function() {
-  kids <- tryCatch(ps::ps_children(ps::ps_handle()), error = function(e) list())
-  vapply(kids, ps::ps_pid, integer(1))
+# ps_children() walks every pid and throws on a child that is mid-exit, which an empty list used to hide; retry, and fail loudly with the real error.
+rp_os_children <- function(want = NULL, tries = 60L) {
+  res <- NULL
+  for (k in seq_len(tries)) {
+    res <- tryCatch(vapply(ps::ps_children(ps::ps_handle()), ps::ps_pid, integer(1)),
+                    error = function(e) e)
+    if (!inherits(res, "error") && (is.null(want) || want %in% res)) return(res)
+    Sys.sleep(0.05)
+  }
+  if (inherits(res, "error")) stop("ps_children() kept failing: ", conditionMessage(res), call. = FALSE)
+  res
 }
 
 rp_pid_state <- function(pid) {
@@ -82,7 +90,8 @@ test_that("the progress reporter is invisible to parallel::children() and leaves
   seen <- NULL
   exec <- function(idx, f, w) {
     seen <<- list(reporter = isTRUE(rnaparallel:::.rp_dispatch$reporter),
-                  mc = length(children()), os = setdiff(rp_os_children(), before_os))
+                  mc = length(children()),
+                  os = setdiff(rp_os_children(want = rnaparallel:::.rp_dispatch$reporter_pid), before_os))
     lapply(idx, f)
   }
   idx <- rnaparallel:::combat_row_chunks(12L, chunks = 3L)

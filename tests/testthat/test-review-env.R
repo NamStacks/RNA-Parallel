@@ -265,3 +265,342 @@ test_that("duplicateCorrelation_parallel keeps limma's note and does not blame t
   expect_true(note %in% got)
   expect_identical(sum(got == note), 1L)
 })
+
+
+# ---- second review round ---------------------------------------------------------------
+
+seen_run <- function(expr) {
+  warns <- msgs <- character()
+  err <- withCallingHandlers(
+    tryCatch(expr, error = function(e) e),
+    warning = function(w) { warns <<- c(warns, conditionMessage(w)); invokeRestart("muffleWarning") },
+    message = function(m) { msgs <<- c(msgs, conditionMessage(m)); invokeRestart("muffleMessage") })
+  list(err = err, warns = warns, msgs = msgs)
+}
+
+noisy_boom <- function(ii) { warning("W", ii); message("M", ii); stop("boom") }
+
+test_that("relay = FALSE in-process dispatch raises held conditions on error and strips rp_held", {
+  for (be in c("serial", "mclapply")) {
+    r <- seen_run(combat_parallel_lapply(list(1L, 2L), noisy_boom,
+                                         if (be == "serial") 2L else 1L, be, relay = FALSE))
+    expect_identical(conditionMessage(r$err), "boom", info = be)
+    expect_identical(r$warns, "W1", info = be)
+    expect_identical(r$msgs, "M1\n", info = be)
+    expect_null(r$err$rp_held)
+  }
+})
+
+test_that("a one-core allocation keeps mclapply's failure in this process, conditions live", {
+  withr::local_envvar(c(SLURM_CPUS_PER_TASK = "1"))
+  idx <- as.list(1:4)
+  f <- function(ii) { warning("W", ii); message("M", ii); if (ii == 2L) stop("boom", ii); ii }
+  pids <- unlist(combat_parallel_lapply(idx, function(ii) Sys.getpid(), 4L, "mclapply"))
+  expect_true(all(pids == Sys.getpid()))
+  r <- seen_run(combat_parallel_lapply(idx, f, 4L, "mclapply"))
+  expect_identical(conditionMessage(r$err), "boom2")
+  expect_null(r$err$rp_held)
+  expect_identical(r$warns, c("W1", "W2"))
+})
+
+test_that("a custom rethrowing backend gets the dispatch class, the held conditions, no rp_held", {
+  custom <- function(idx, f, workers) lapply(idx, f)
+  idx <- as.list(1:3)
+  r <- seen_run(combat_parallel_lapply(idx, noisy_boom, 2L, custom))
+  expect_s3_class(r$err, "rnaparallel_dispatch_error")
+  expect_identical(conditionMessage(r$err), "boom")
+  expect_null(r$err$rp_held)
+  expect_identical(r$warns, "W1")
+  expect_identical(r$msgs, "M1\n")
+})
+
+test_that("a failed dispatch raises only the failing chunk's conditions, on every backend", {
+  skip_if_not_installed("doParallel")
+  f <- function(ii) { warning("W", ii); if (ii == 2L) stop("boom"); ii }
+  idx <- as.list(1:4)
+  for (be in c("mclapply", "foreach")) {
+    r <- seen_run(combat_parallel_check(combat_parallel_lapply(idx, f, 2L, be), "stage x", idx))
+    expect_s3_class(r$err, "rnaparallel_dispatch_error")
+    expect_identical(r$warns, "W2", info = be)
+  }
+})
+
+test_that("a prescheduled core's copies of one error count as one failed chunk", {
+  skip_if(rnaparallel:::rp_host_cores() < 2L, "the dispatch needs 2 allowed cores to fork")
+  idx <- as.list(1:6)
+  f <- function(ii) if (ii == 3L) stop("boom3") else ii
+  e <- tryCatch(combat_parallel_check(
+    combat_parallel_lapply(idx, f, 2L, "mclapply", preschedule = TRUE), "T", idx),
+    error = function(e) e)
+  expect_s3_class(e, "rnaparallel_dispatch_error")
+  expect_identical(e$n_errored, 1L)
+  expect_identical(e$n_chunks, 6L)
+  expect_false(grepl("identical error", conditionMessage(e), fixed = TRUE))
+  e6 <- dispatch_error(function(ii) stop("same"))
+  expect_identical(e6$n_errored, 6L)
+})
+
+test_that("the cause keeps the worker's condition class on BiocParallel", {
+  skip_if_not_installed("BiocParallel")
+  f <- function(ii) stop(errorCondition("boom", class = "my_class"))
+  b <- dispatch_error(f, backend = "BiocParallel")
+  expect_s3_class(b, "rnaparallel_dispatch_error")
+  expect_s3_class(b$cause, "my_class")
+  expect_null(b$cause$rp_class)
+  m <- dispatch_error(f)
+  expect_s3_class(m$cause, "my_class")
+})
+
+test_that("a dead future worker is a death with the worker-died advice", {
+  guard <- rnaparallel:::rp_backend_guard
+  dead <- structure(class = c("FutureInterruptError", "FutureError", "error", "condition"),
+                    list(message = "A future was interrupted", call = NULL))
+  e <- tryCatch(guard(stop(dead), 4L, "stage k"), error = function(e) e)
+  expect_s3_class(e, "rnaparallel_dispatch_error")
+  expect_identical(e$n_died, 1L)
+  expect_identical(e$n_errored, 0L)
+  expect_match(conditionMessage(e), "the worker process died", fixed = TRUE)
+  expect_match(conditionMessage(e), "lower `workers`", fixed = TRUE)
+  user <- tryCatch(guard(stop("boom"), 4L, "stage k"), error = function(e) e)
+  expect_identical(user$n_died, 0L)
+  expect_identical(user$n_errored, 1L)
+})
+
+test_that("infra counts a death only on positive evidence", {
+  guard <- rnaparallel:::rp_backend_guard
+  for (msg in c("worker initialization failed: no package called 'edgeR'",
+                "task 2 failed - \"boom-user\"",
+                "lazy-load database 'x.rdb' is corrupt")) {
+    e <- tryCatch(guard(stop(msg), 4L, "s", infra = TRUE), error = function(e) e)
+    expect_s3_class(e, "rnaparallel_dispatch_error")
+    expect_identical(e$n_died, 0L, info = msg)
+    expect_identical(e$n_errored, 1L, info = msg)
+    expect_false(grepl("worker process died", conditionMessage(e), fixed = TRUE), info = msg)
+  }
+  stale <- tryCatch(guard(stop("lazy-load database 'x.rdb' is corrupt"), 4L, "s", infra = TRUE),
+                    error = function(e) e)
+  expect_match(conditionMessage(stale), "Restart R", fixed = TRUE)
+  for (msg in c("error reading from connection", "wrong args for environment subassignment")) {
+    e <- tryCatch(guard(stop(msg), 4L, "s", infra = TRUE), error = function(e) e)
+    expect_identical(e$n_died, 1L, info = msg)
+    expect_identical(e$n_errored, 0L, info = msg)
+    expect_match(conditionMessage(e), "the worker process died", fixed = TRUE)
+  }
+  dead <- structure(class = c("FutureError", "error", "condition"),
+                    list(message = "lazy-load database 'x.rdb' is corrupt", call = NULL))
+  e <- tryCatch(guard(stop(dead), 4L, "s"), error = function(e) e)
+  expect_identical(e$n_died, 1L)
+  expect_match(conditionMessage(e), "Restart R", fixed = TRUE)
+})
+
+test_that("every backend's failure carries the stage label the caller names", {
+  skip_if_not_installed("future.apply")
+  skip_if_not_installed("BiocParallel")
+  withr::local_options(rnaparallel.verbose = FALSE)
+  old <- future::plan(future::sequential)
+  withr::defer(future::plan(old))
+  idx <- as.list(1:3)
+  f <- function(ii) stop("boom")
+  for (be in list("future", "BiocParallel", function(idx, f, workers) lapply(idx, f))) {
+    e <- suppressWarnings(tryCatch(combat_parallel_lapply(idx, f, 2L, be, what = "stage W"),
+                                   error = function(e) e))
+    expect_identical(e$stage, "stage W", info = format(be)[1L])
+  }
+  e <- tryCatch(combat_parallel_lapply(idx, f, 2L, function(idx, f, workers) lapply(idx, f)),
+                error = function(e) e)
+  expect_identical(e$stage, "dispatch")
+  cts <- matrix(rpois(60 * 12, 20) + 1L, 60, 12)
+  custom <- function(idx, f, workers) stop("injected")
+  withr::local_options(combat.min.norm.cells = 0, combat.min.order.cells = 0)
+  e <- tryCatch(calcNormFactors_parallel(cts, method = "RLE", workers = 2L, chunks = 2L,
+                                         parallel_backend = custom), error = function(e) e)
+  expect_s3_class(e, "rnaparallel_dispatch_error")
+  expect_identical(e$stage, "calcNormFactors_parallel RLE columns")
+})
+
+test_that("every dispatch site names its own stage on a failing custom backend", {
+  skip_if_not_installed("sva")
+  skip_if_not_installed("limma")
+  skip_if_not_installed("statmod")
+  withr::local_options(rnaparallel.verbose = FALSE)
+  fail_at <- function(k) {
+    n <- 0L
+    function(idx, f, workers) { n <<- n + 1L; if (n == k) stop("injected") else lapply(idx, f) }
+  }
+  stage <- function(run, k = 1L) {
+    tryCatch(suppressWarnings(suppressMessages(run(fail_at(k)))), error = function(e) e$stage)
+  }
+  set.seed(1)
+  M <- matrix(rnorm(60 * 12), 60, 12)
+  des <- cbind(1, rep(0:1, 6))
+  expect_identical(stage(function(b) lmFit_parallel(M, des, workers = 2L, chunks = 2L,
+                                                    parallel_backend = b)),
+                   "lmFit_parallel/lm.series")
+  M2 <- matrix(rnorm(60 * 10), 60, 10)
+  des2 <- cbind(1, rep(0:1, each = 5))
+  expect_identical(stage(function(b) duplicateCorrelation_parallel(
+    M2, des2, block = rep(1:5, each = 2), workers = 2L, chunks = 2L, parallel_backend = b)),
+    "duplicateCorrelation across gene blocks")
+  cts <- matrix(rnbinom(300 * 24, mu = 40, size = 1.5), 300, 24)
+  bat <- rep(1:3, each = 8)
+  grp <- rep(0:1, 12)
+  cs <- function(k, g = NULL) {
+    stage(function(b) ComBat_seq_parallel(cts, batch = bat, group = g, workers = 2L,
+                                          parallel_backend = b), k)
+  }
+  expect_identical(cs(1L), "estimateGLMCommonDisp across batches")
+  expect_identical(cs(2L), "estimateGLMTagwiseDisp across batches")
+  expect_identical(cs(3L), "match_quantiles_parallel")
+  expect_identical(cs(3L, grp), "glmFit_rows_parallel")
+  y <- matrix(rnbinom(100 * 20, mu = 50, size = 4), 100, 20)
+  d3 <- cbind(1, rep(0:1, 10), rnorm(20))
+  expect_identical(stage(function(b) rnaparallel:::estimateGLMTagwiseDisp_rows_parallel(
+    y, design = d3, dispersion = 0.2, prior.df = 0, workers = 2L, chunks = 2L,
+    parallel_backend = b)), "estimateGLMTagwiseDisp_rows_parallel")
+})
+
+test_that("the cause of a dispatch error carries no held conditions", {
+  skip_if_not_installed("BiocParallel")
+  f <- function(ii) { warning("held-W"); stop("boom") }
+  for (be in list("mclapply", function(idx, f, workers) lapply(idx, f), "BiocParallel")) {
+    r <- seen_run(dispatch_error(f, backend = be))
+    expect_s3_class(r$err, "rnaparallel_dispatch_error")
+    expect_null(r$err$cause$rp_held, info = format(be)[1L])
+    expect_identical(r$warns, "held-W", info = format(be)[1L])
+  }
+})
+
+test_that("the cancel message and the missing-result warning are muffled on every dispatch route", {
+  skip_if_not_installed("future.apply")
+  skip_on_cran()
+  skip_on_os("windows")
+  skip_if(rnaparallel:::rp_host_cores() < 2L, "the dispatch needs 2 allowed cores to fork")
+  killer <- function(ii) { if (ii == 2L) tools::pskill(Sys.getpid(), tools::SIGKILL); ii }
+  idx <- as.list(1:4)
+  skip_if_not(future::supportsMulticore())
+  old <- future::plan(future::multicore, workers = 2L)
+  withr::defer(future::plan(old))
+  for (be in "future") {
+    r <- seen_run(combat_parallel_check(combat_parallel_lapply(idx, killer, 2L, be), "k", idx))
+    expect_s3_class(r$err, "rnaparallel_dispatch_error")
+    expect_false(any(grepl("did not deliver", r$warns, fixed = TRUE)), info = be)
+  }
+  future::plan(future::sequential)
+  fa <- function(idx, f, workers) future.apply::future_lapply(idx, f, future.seed = NULL)
+  r <- seen_run(combat_parallel_lapply(as.list(1:3), noisy_boom, 2L, fa))
+  expect_s3_class(r$err, "rnaparallel_dispatch_error")
+  expect_false(any(grepl("Canceling all iterations", r$msgs, fixed = TRUE)))
+  expect_identical(r$msgs, "M1\n")
+})
+
+test_that("a one-core mclapply dispatch starts no reporter", {
+  withr::local_envvar(c(SLURM_CPUS_PER_TASK = "1"))
+  started <- 0L
+  testthat::local_mocked_bindings(
+    rp_reporter_start = function(...) { started <<- started + 1L; NULL }, .package = "rnaparallel")
+  got <- combat_parallel_lapply(as.list(1:4), function(ii) ii, 4L, "mclapply")
+  expect_identical(unlist(got), 1:4)
+  expect_identical(started, 0L)
+})
+
+test_that("a killed mclapply child is reported once, without mclapply's own warning", {
+  skip_on_cran()
+  skip_if(rnaparallel:::rp_host_cores() < 2L, "the dispatch needs 2 allowed cores to fork")
+  idx <- as.list(1:4)
+  f <- function(ii) { if (ii == 2L) tools::pskill(Sys.getpid(), tools::SIGKILL); ii }
+  r <- seen_run(combat_parallel_check(combat_parallel_lapply(idx, f, 2L, "mclapply"), "k", idx))
+  expect_s3_class(r$err, "rnaparallel_dispatch_error")
+  expect_identical(r$err$n_died, 1L)
+  expect_false(any(grepl("did not deliver", r$warns, fixed = TRUE)))
+})
+
+test_that("a failed future dispatch leaks neither future.apply's cancel message nor rp_held", {
+  skip_if_not_installed("future.apply")
+  old <- future::plan(future::sequential)
+  withr::defer(future::plan(old))
+  r <- seen_run(suppressWarnings(combat_parallel_lapply(as.list(1:3), noisy_boom, 2L, "future")))
+  expect_s3_class(r$err, "rnaparallel_dispatch_error")
+  expect_false(any(grepl("Canceling all iterations", r$msgs, fixed = TRUE)))
+  expect_null(r$err$rp_held)
+})
+
+test_that("a launch or eval FutureError is an error, not a worker death", {
+  guard <- rnaparallel:::rp_backend_guard
+  mk <- function(cls) structure(class = c(cls, "FutureError", "error", "condition"),
+                                list(message = "attach failed", call = NULL))
+  for (cls in c("FutureLaunchError", "FutureEvalError")) {
+    e <- tryCatch(guard(stop(mk(cls)), 4L, "s"), error = function(e) e)
+    expect_s3_class(e, "rnaparallel_dispatch_error")
+    expect_identical(e$n_died, 0L, info = cls)
+    expect_identical(e$n_errored, 1L, info = cls)
+    expect_false(grepl("worker process died", conditionMessage(e), fixed = TRUE), info = cls)
+  }
+  e <- tryCatch(guard(stop(mk("FutureInterruptError")), 4L, "s"), error = function(e) e)
+  expect_identical(e$n_died, 1L)
+})
+
+test_that("a stopped registered foreach cluster is an error with the stage, not a death", {
+  skip_if_not_installed("doParallel")
+  skip_if_not_installed("foreach")
+  withr::local_options(rnaparallel.verbose = FALSE)
+  cl <- parallel::makeCluster(2L)
+  doParallel::registerDoParallel(cl)
+  withr::defer(foreach::registerDoSEQ())
+  parallel::stopCluster(cl)
+  e <- tryCatch(combat_parallel_lapply(as.list(1:3), function(ii) ii, 2L, "foreach",
+                                       what = "stage W"), error = function(e) e)
+  expect_s3_class(e, "rnaparallel_dispatch_error")
+  expect_identical(e$stage, "stage W")
+  expect_identical(e$n_died, 0L)
+  expect_identical(e$n_errored, 1L)
+  expect_false(grepl("worker process died", conditionMessage(e), fixed = TRUE))
+})
+
+test_that("translated connection errors and missing-result warnings are recognized", {
+  guard <- rnaparallel:::rp_backend_guard
+  withr::local_language("de")
+  lost <- c("error reading from connection", "wrong args for environment subassignment")
+  tr <- gettext(lost, domain = "R")
+  skip_if(identical(tr, lost), "this R has no translation of the connection messages")
+  for (msg in tr) {
+    e <- tryCatch(guard(stop(msg), 4L, "s", infra = TRUE), error = function(e) e)
+    expect_identical(e$n_died, 1L, info = msg)
+  }
+  w <- ngettext(1, "%d parallel function call did not deliver a result",
+                "%d parallel function calls did not deliver results", domain = "R-parallel")
+  skip_if(identical(w, "%d parallel function call did not deliver a result"),
+          "this R has no translation of the missing-result warning")
+  seen <- character()
+  withCallingHandlers(
+    guard({ warning(sprintf(w, 1L)); 1 }, 1L, "s"),
+    warning = function(x) { seen <<- c(seen, conditionMessage(x)); invokeRestart("muffleWarning") })
+  expect_length(seen, 0L)
+})
+
+test_that("under LANGUAGE=de a killed foreach worker still counts as a death", {
+  skip_on_cran()
+  skip_on_os("windows")
+  skip_if_not_installed("doParallel")
+  skip_if(rnaparallel:::rp_host_cores() < 2L, "the dispatch needs 2 allowed cores to fork")
+  script <- tempfile(fileext = ".R")
+  withr::defer(unlink(script))
+  libs <- paste0("R_LIBS=", shQuote(paste(.libPaths(), collapse = .Platform$path.sep)))
+  lines <- c(
+    "f <- function(ii) { Sys.sleep(0.3); if (ii == 2L) tools::pskill(Sys.getpid(), tools::SIGKILL); ii }",
+    "environment(f) <- baseenv()",
+    "w <- character()",
+    paste0("e <- withCallingHandlers(tryCatch(rnaparallel:::combat_parallel_lapply(as.list(1:4), f, ",
+           "2L, 'foreach', cells = Inf, min_cells = 0), error = function(e) e), ",
+           "warning = function(x) { w <<- c(w, conditionMessage(x)); invokeRestart('muffleWarning') })"),
+    "cat('\\nTRANS', gettext('error reading from connection', domain = 'R') != 'error reading from connection', '\\n')",
+    "cat('\\nDIED', e$n_died, e$n_errored, '\\n')",
+    "cat('NWARN', length(w), '\\n')",
+    "rnaparallel::combat_cluster_stop()")
+  writeLines(c(rp_load_line(), lines), script)
+  out <- suppressWarnings(system2(file.path(R.home("bin"), "Rscript"),
+                                  c("--vanilla", shQuote(script)), stdout = TRUE, stderr = TRUE,
+                                  env = c("NOT_CRAN=true", libs, "LANGUAGE=de"), timeout = 60))
+  skip_if(any(grepl("^TRANS FALSE", out)), "the connection message is untranslated here")
+  expect_match(grep("^DIED ", out, value = TRUE), "^DIED 1 0 *$", info = paste(tail(out, 6), collapse = "\n"))
+  expect_match(grep("^NWARN ", out, value = TRUE), "^NWARN 0 *$")
+})

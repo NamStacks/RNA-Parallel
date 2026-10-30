@@ -121,7 +121,8 @@ test_that("rp_step_begin refuses a combat.progress.dir it cannot create loudly",
 test_that("the default progress directory under tempdir() is still created silently", {
   withr::local_options(combat.progress.dir = NULL)
   d <- rnaparallel:::rp_progress_dir()
-  expect_identical(dirname(d), file.path(tempdir(), "rnaparallel-progress"))
+# dirname() returns forward slashes on Windows, so the expected side goes through it too.
+  expect_identical(dirname(d), dirname(file.path(tempdir(), "rnaparallel-progress", "x")))
   expect_match(basename(d), paste0("^", Sys.getpid(), "-[0-9]+$"))
   expect_true(dir.exists(d))
 })

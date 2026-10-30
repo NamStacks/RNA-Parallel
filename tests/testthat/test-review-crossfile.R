@@ -48,10 +48,12 @@ test_that("a SummarizedExperiment above the default dispatch gate dispatches and
   skip_if_not_installed("SummarizedExperiment")
   skip_on_cran()
   withr::local_options(combat.min.norm.cells = NULL, combat.min.order.cells = NULL)
-  cts <- xf_counts(G = 6000L, S = 40L)
-  expect_gte(length(cts), 2e5)
-  se <- SummarizedExperiment::SummarizedExperiment(assays = list(counts = cts))
   spy <- xf_spy()
+# The unset gate is 2e5 cells where a worker inherits the matrix and 2e6 where it is copied, so the matrix is sized from the gate this backend resolves.
+  gate <- rnaparallel:::rp_norm_min_cells(spy$backend)
+  cts <- xf_counts(G = max(6000L, as.integer(ceiling(gate / 40L)) + 1L), S = 40L)
+  expect_gte(length(cts), gate)
+  se <- SummarizedExperiment::SummarizedExperiment(assays = list(counts = cts))
   expect_identical(calcNormFactors_parallel(se, workers = 2L, parallel_backend = spy$backend),
                    edgeR_norm(se))
   expect_gte(spy$count(), 1L)

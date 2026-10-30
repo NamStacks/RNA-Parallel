@@ -12,6 +12,29 @@ tools read their files correctly. Every result is still `identical()` to the ori
   design matrix not of full rank", now reach the master on every backend and on the in-session
   paths, and `traceback()` still shows the failing frames.
 
+- **Worker failures are reported the same way on every backend.** A `foreach` worker that dies
+  mid-chunk, a custom `parallel_backend` that rethrows, and a `future` or `BiocParallel` failure
+  all raise `rnaparallel_dispatch_error`. `stage` carries the label the calling step names, a
+  dead `future`, `BiocParallel` or `foreach` worker reports `n_died` with the lower-`workers`
+  advice, and `cause` keeps the worker's own condition class on BiocParallel. A failed dispatch
+  raises only the failing chunks' warnings and messages, neither the error nor its `cause`
+  carries the stray `rp_held` field, and the "did not deliver a result" warning of `mclapply`,
+  `future` and `BiocParallel` and future.apply's "Canceling all iterations" message no longer
+  reach the caller. A `foreach` worker that dies the instant it picks up a task can still leave
+  base R's cluster wait blocked.
+- **Held warnings survive `relay = FALSE` and one-core allocations.** An in-process dispatch that
+  fails after a warning or message now raises it first, and `mclapply` under a one-CPU allocation
+  runs in this process, with no progress reporter, instead of losing the conditions.
+- **`n_errored` counts failed chunks, not copies.** A prescheduled `mclapply` core that failed
+  once no longer reports every chunk it held as failed.
+- **Slurm jobs without `--cpus-per-task` are respected.** The default `workers` also reads
+  `SLURM_CPUS_ON_NODE` and `SLURM_JOB_CPUS_PER_NODE`. An absurdly large allocation no longer
+  warns on every call.
+- **`calcNormFactors_parallel()` stays lean for one chunk and keeps a custom backend's
+  environment.** A one-chunk dispatch no longer copies the matrix into a payload, and an RLE
+  closure that reaches a helper, an S3 method or a `do.call()` target held above its call frame
+  works on socket backends again.
+
 - **`calcNormFactors_parallel()` reads positional arguments on a `DGEList` the way edgeR does.**
   `calcNormFactors_parallel(y, "RLE")` used to return TMM factors silently. The timing line now
   names the method that ran.

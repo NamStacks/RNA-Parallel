@@ -417,7 +417,8 @@ duplicateCorrelation_parallel <- function(object, design = NULL, ndups = 2L, spa
   parts <- combat_parallel_check(
     combat_parallel_lapply(idx, fit_block, workers, parallel_backend,
                            cells = length(M),
-                           min_cells = getOption("combat.min.dupcor.cells", 5000)),
+                           min_cells = getOption("combat.min.dupcor.cells", 5000),
+                           what = "duplicateCorrelation across gene blocks"),
     "duplicateCorrelation across gene blocks", idx)
 
   vals <- lapply(parts, function(p) p$value)
