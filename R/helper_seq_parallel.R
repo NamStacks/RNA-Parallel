@@ -372,8 +372,9 @@ rp_copy_free <- function(parallel_backend) {
 
 #' Size gate for a row or column split, resolved against the backend that will run it
 #'
-#' 6e6 cells is the least-squares break-even where the payload is INHERITED, and 2e4 the
-#' weighted branch's. Measured on
+#' 6e6 cells is the least-squares break-even where the payload is INHERITED. The weighted
+#' branch is gated at 2e4 cells and 2,000 genes, below its measured break-even of about 4,000
+#' genes (see rp_wt_min_genes()). Measured on
 #' Windows over PSOCK with the gate forced open, 1,200 samples, the split never approaches
 #' parity and gets worse with every worker added:
 #'
@@ -386,7 +387,7 @@ rp_copy_free <- function(parallel_backend) {
 #' Each branch consults its OWN option. That is not a detail: the merged Windows branch routed
 #' both branches through one function whose first act was to return `combat.min.ls.cells` when
 #' it was set, so a caller who raised the least-squares gate silently raised the voom/weighted
-#' one from 2e4 to the same value and switched off a split the docs measure at 3.70x-4.35x.
+#' one from 2e4 to the same value and switched off a split the docs measure at 3.92x-4.69x.
 #' The suite could not see it, because setup-parallel.R sets every gate to 0 and that function
 #' returns from its first line for both branches throughout.
 #' @param option Name of the option this branch honors.
@@ -409,20 +410,22 @@ rp_ls_min_cells <- function(option, fork_default, parallel_backend) {
 #' fixed 1,000 genes the split behaves the same at 8, 24 and 48 arrays while the cell count
 #' moves 8,000 to 48,000, straddling the 2e4 cell gate that used to decide it.
 #'
-#' Measured on this M3 at the default worker count, gate forced open, median of 9, companion
-#' against original, every arm `identical()`, at 8 / 24 / 48 arrays:
+#' Measured on an M6 at the default worker count, gate forced open, median of 9 timed batches,
+#' companion against original, every arm `identical()`, at 8 / 24 / 48 arrays; the memory guard
+#' ran 6 or 7 of the 8 workers at 4,000 x 48 and above:
 #'
-#'   500 genes    0.71x  0.57x  0.75x
-#'   1,000        1.16x  1.26x  1.25x
-#'   2,000        1.39x  1.48x  1.75x
-#'   4,000        1.95x  2.02x  2.16x
+#'   500 genes    0.21x  0.22x  0.23x
+#'   1,000        0.35x  0.37x  0.39x
+#'   2,000        0.60x  0.62x  0.69x
+#'   4,000        0.99x  1.03x  1.13x
+#'   8,000        1.49x  1.53x  1.63x
+#'   16,000       1.95x  1.99x  2.11x
 #'
-#' A second measurement run on the same machine found the same shape and put 1,000 genes at
-#' 0.78x / 0.83x / 0.97x, a loss where this run has a win. The two disagree only there, and
-#' both agree from 2,000 up, so the default sits where both agree rather than at either run's
-#' own crossover. Being too high forgoes about 1.2x on a thin matrix; being too low returns
-#' 0.57x, and a companion slower than the function it wraps is the thing these gates exist to
-#' prevent.
+#' The default of 2,000 sits below that crossover of about 4,000 genes, so between the two the
+#' split runs slower than the original: by 13 to 16 ms per call at 2,000 genes, falling to
+#' nothing near 4,000. Being too high forgoes 1.49x to 1.63x at 8,000 genes; being too low
+#' returns 0.21x at 500, and a companion slower than the function it wraps is the thing these
+#' gates exist to prevent.
 #' @return Gene count below which the weighted least-squares split does not run.
 #' @noRd
 rp_wt_min_genes <- function() {
@@ -444,7 +447,7 @@ rp_wt_min_genes <- function() {
 #'
 #' Unlike the least-squares split this one does pay at scale, so the gate rises instead of
 #' closing: break-even sits around two million cells, an order of magnitude above the fork
-#' value. On the cohort the companion measured 1.63x with the gate in place.
+#' value. On the cohort the companion measured 1.84x with the gate in place.
 #' @return Cell count below which the column split does not run.
 #' @noRd
 rp_norm_min_cells <- function(parallel_backend) {
@@ -985,8 +988,8 @@ combat_wait_pids <- function(pids, identities = NULL, timeout = 2) {
 #' at once should pass a smaller number.
 #' Without fork() the pick is additionally capped at the PERFORMANCE core count, which is not
 #' the core count on a hybrid CPU. The distinction only matters where there is no fork: a forked
-#' worker on an efficiency core still adds throughput, which is why the macOS run measures 5.43x
-#' at eight workers on a chip with four performance cores and is left alone here. Over sockets
+#' worker on an efficiency core still adds throughput, which is why the macOS run measures 5.33x
+#' at eight workers on a chip with six fast cores, against 4.70x at six, and is left alone here. Over sockets
 #' every worker also costs a serialized copy, so a slow core stops paying for itself: on an Ultra
 #' 185H, 6 performance plus 10 efficiency, the ComBat-seq curve peaks at 6 workers and turns over
 #' after. Reading the core count alone would have picked 8.
@@ -1058,7 +1061,7 @@ rp_cpu_limit <- function(proc = "/proc/self/cgroup", root = "/sys/fs/cgroup") {
 #' Performance cores, distinguished from total cores on a hybrid CPU
 #'
 #' There used to be two of these and they disagreed. This one read the SMT topology and
-#' answered 8 on an Apple M3; a second copy inside `combat_parallel_lapply` shelled out to
+#' answered 8 on a Mac with 4 performance cores; a second copy inside `combat_parallel_lapply` shelled out to
 #' `sysctl hw.perflevel0.physicalcpu` and answered 4, which is right. One routine now, asking
 #' each platform the best question it can answer, memoised once.
 #'
@@ -1877,7 +1880,7 @@ combat_parallel_lapply <- function(idx, f, workers,
 # Memoised, because both branches spawn a process on macOS, about 10 ms each, and the core count does not change mid-session.
   perf <- rp_perf_cores()
 
-# The note fires only for a backend that hands each worker a serialized copy of the job, which includes a MulticoreParam once started (only in a session with attached children), because a worker that shares the parent's pages still adds throughput on an efficiency core (5.43x at eight workers on four performance cores).
+# The note fires only for a backend that hands each worker a serialized copy of the job, which includes a MulticoreParam once started (only in a session with attached children), because a worker that shares the parent's pages still adds throughput on an efficiency core (5.33x at eight workers on six fast cores, against 4.70x at six).
   if ((!rp_copy_free(parallel_backend) || (parallel_backend == "BiocParallel" && length(combat_children()))) && ncore > perf &&
       is.null(.combat_clusters$warned_ecores)) {
     .combat_clusters$warned_ecores <- TRUE

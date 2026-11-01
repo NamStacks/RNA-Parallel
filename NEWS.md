@@ -392,8 +392,8 @@ work they throw away.
   the unweighted branch and `removeBatchEffect` are parity until the matrix is large. Under a gate
   a companion is one original call plus 0.3 to 0.6 ms.
 
-- **The package stopped warning about its own default.** `min(8, detectCores() - 2)` is 6 on an
-  M3 with 4 performance cores, so every fresh session opened by saying that might be slower than
+- **The package stopped warning about its own default.** `min(8, detectCores() - 2)` is 6 on a
+  Mac with 4 performance cores, so every fresh session opened by saying that might be slower than
   a number it had declined to pick, contradicting the 5.43x at eight workers this package
   publishes for that chip. There were two performance-core routines disagreeing (8 against 4);
   there is one now, and the message fires only where the payload is copied, which is where it is

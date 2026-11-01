@@ -37,3 +37,10 @@ tests/testthat/testthat-problems.rds
 inst/examples/render_linux.log
 inst/examples/.render_and_publish.sh
 inst/examples/.setup_linux_install.R
+
+# setup_windows.ps1 writes these while a render runs
+inst/examples/render_windows.log
+inst/examples/render_windows.err.log
+inst/examples/.render_and_publish.ps1
+inst/examples/.setup_windows_install.R
+inst/examples/.setup_windows_check.R

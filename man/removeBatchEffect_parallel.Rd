@@ -34,11 +34,11 @@ efficiency core also costs a serialized copy. Pass a smaller
 number when a second R process is also forking; six workers alongside one
 kernel-panicked a 24 GB machine, and no core count read here can see that session.
 
-Going past your PERFORMANCE core count can be slower than stopping at it, and the loss is
-worst on the largest inputs, which is exactly where people reach for more workers.
-Measured on an 8-core machine with 4 performance cores, TMM on 15,000 genes by 9,000
-specimens: 4 workers 10.74 s, 6 workers 7.26 s, 8 workers 11.60 s. Eight was slower than
-four. The default resolved to 6 there and was optimal; raising it by hand made it worse.
+More workers is not always faster, and which count wins depends on the job. Measured on an
+M6 with 6 fast cores of 12, \code{duplicateCorrelation_parallel()} on 3,000 genes by 100 arrays
+ran 13x to 14x at 4 workers and 9.48x at the default 8, which the memory guard lowered to 7.
+ComBat-seq on the TCGA cohort went the other way, 5.33x at 8 workers against 4.70x at 6, so
+measure before raising the count by hand.
 
 With \code{parallel_backend = "foreach"} and a backend you registered yourself, \code{workers} sets
 only the default chunk count, and that backend's width bounds concurrency; see
@@ -86,10 +86,12 @@ the whole product costs a fraction of the fit it follows.
 
 On large matrices, and not before. This companion IS the \code{lmFit} call inside the original, so
 it inherits that function's answer exactly: below the least-squares gate there is nothing to
-split and the companion is the original plus about a millisecond. Measured on an M3 at the
-default worker count, companion against original, every arm \code{identical()}: 1.00x at 2,000
-genes by 20 samples, 0.92x at 20,000 x 50, 0.98x at 20,000 x 200, then 1.91x at 20,000 x 500
-once the matrix is large enough for the split to run at all.
+split and the companion is the original plus about a millisecond. Measured on an M6 at the
+default worker count, companion against original, every arm \code{identical()}: 0.46x at 2,000
+genes by 20 samples, where 0.7 ms of overhead sits on a 0.6 ms call; 1.25x at 20,000 x 50 and
+0.94x at 20,000 x 200, run-to-run noise around parity with nothing dispatched; then 2.18x at
+20,000 x 500 once the matrix is large enough for the split to run at all, where the memory
+guard ran 3 of the 8 workers.
 }
 
 \examples{

@@ -1,85 +1,30 @@
+<div align="center">
+
 # RNA-Parallel
+
+Parallel companions for five slow functions in sva, edgeR and limma. Each one runs the original unmodified and returns output `identical()` to it, bit for bit.
+
+Same arguments, same defaults, same result, faster at cohort scale. An R package for macOS, Linux and Windows.
 
 [![version](https://img.shields.io/badge/version-0.5.1-blue)](NEWS.md)
 [![R](https://img.shields.io/badge/R-%E2%89%A5%204.1-blue)](DESCRIPTION)
 [![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE.md)
 
-Parallel companions for five functions in sva, edgeR and limma. Each one calls the original
-function unmodified and returns output `identical()` to it, bit for bit. Same arguments, same
-defaults (exceptions under [Use](#use)), same result, faster at cohort scale.
+[Install](#install) | [Use](#use) | [Speedup](#speedup) | [Reports](#rendering-the-reports) | [Report a problem](https://github.com/NamStacks/RNA-Parallel/issues)
 
-Rendered analysis: [macOS](https://namstacks.github.io/RNA-Parallel/) ·
-[Linux](https://namstacks.github.io/RNA-Parallel/linux.html) ·
-[Windows](https://namstacks.github.io/RNA-Parallel/windows.html)
-(macOS rendered with rnaparallel 0.5.1; Linux and Windows with 0.5.0, re-render pending)
+</div>
 
-## Speedup
+## What it does
 
-TCGA, 18,270 genes by 1,500 tumors. Every arm `identical()` to the original on all three
-platforms. macOS: Mac mini M6, 6 fast + 6 efficiency cores. Linux: 2x Xeon, 16 cores. Windows: Ultra 9 185H, 6P+10E.
-
-| companion | runs | macOS | Linux | Windows |
-|---|---|---:|---:|---:|
-| `ComBat_seq_parallel()` | `sva::ComBat_seq` | 5.31x @ 8w | **9.34x @ 16w** | 3.57x @ 6w |
-| `calcNormFactors_parallel()` | `edgeR::normLibSizes` | **5.78x @ 8w** | 4.12x @ 8w | 1.74x @ 2w |
-| `lmFit_parallel()` | `limma::lmFit` | 1.58x @ 8w | **3.37x @ 16w** | 1.10x @ 4w |
-| `duplicateCorrelation_parallel()` | `limma::duplicateCorrelation` | 4.53x @ 6w | **7.22x @ 16w** | 2.07x @ 4w |
-| `removeBatchEffect_parallel()` | `limma::removeBatchEffect` | **3.11x @ 8w** | 1.39x @ 8w | 0.90x @ 2w |
-
-Bold = fastest platform per row. Windows has no `fork()` (a worker is a full copied process, and
-only 6 of 16 cores are performance cores), which caps its scaling; `lmFit`/`removeBatchEffect`
-there are parity, not speedups. Full breakdown and every wall-clock number in
-[REFERENCE.md](REFERENCE.md#cross-platform).
-
-Nothing here is reimplemented, apart from one helper transcribed from sva and three default
-statements transcribed from edgeR (see [License](#license)). The original function runs, with
-only its slow internal steps swapped for parallel versions in a child of its own
-environment. `identical()` is checked directly, not a tolerance.
-
-## Why these five
-
-RNA-Parallel is a companion, not a replacement. It plugs into five steps of a limma, edgeR or
-sva ComBat-seq pipeline, each chosen because all three hold:
-
-1. **It is slow at cohort scale.** Most steps finish in seconds; a few take minutes.
-2. **It has no parallel option of its own.** No exported limma or edgeR function takes a
-   `BPPARAM`, `parallel` or worker argument, and neither does `sva::ComBat_seq`. DESeq2's
-   `DESeq()`, `results()` and `lfcShrink()` and sva's `ComBat()` already take `BPPARAM`.
-3. **It splits without changing the answer.** Steps that pool every gene into one estimate
-   (eBayes priors, dispersion trends, voom's lowess curve, quantile normalization) do not.
-
-Serial time, simulated 20,000 genes by 300 samples, Apple M3 (`tools/profile_pipelines.R`):
-
-| step | serial | companion | why |
-|---|---:|---|---|
-| `limma::voomWithQualityWeights` | 906.5 s | no | each gene's update feeds the sample weights the next gene starts from, so the loop is sequential and no split reproduces it |
-| `limma::duplicateCorrelation` | 348.9 s | yes | one REML fit per gene |
-| `limma::lmFit`, block + correlation | 60.0 s | yes | one Cholesky per gene under voom weights |
-| `sva::ComBat_seq` | 32.7 s | yes | quantile matching splits by gene rows; common and tagwise dispersion split by batch; `glmFit` splits by rows only when `group` or `covar_mod` is given |
-| `DESeq2::DESeq` | 32.0 s | no | already parallel through `BPPARAM` |
-| `edgeR::estimateDisp`, `edgeR::glmQLFit` | 15.2 s, 4.1 s | no | built and removed: output was not `identical()` |
-| `edgeR::normLibSizes` (TMM) | 2.2 s | yes | one factor per sample, each against one reference column chosen once from all samples |
-| `limma::lmFit` (voom weights), `limma::removeBatchEffect` | 0.9 s, 0.1 s | yes | one weighted fit per gene; one `lmFit` with the batch columns added |
-| `DESeq2::vst`, `edgeR::glmQLFTest` | 0.9 s, 0.2 s | no | not timed at cohort scale |
-| `limma::voom` | 0.5 s | no | its `lowess` trend's span is a fraction of the gene count, so only the arithmetic after it splits; a companion measured 0.99x |
-| `eBayes`, `topTable`, `filterByExpr` and other quick steps | under 0.1 s | no | nothing to gain |
-
-TMM, `lmFit` and `removeBatchEffect` are cheap here and grow with the cohort: on the Speedup
-matrix (18,270 genes by 1,500 tumors) they take 10.3 s, 4.4 s and 4.5 s serial on the M3
-([REFERENCE.md](REFERENCE.md#cross-platform)). `vst` and `glmQLFTest` were not timed at that
-scale, so nothing yet shows a fork would pay for them. Each companion takes its original's
-arguments and returns its original's object, so `voom`, `eBayes`, `topTable`, `glmQLFit` and
-DESeq2 read the output unchanged. `voom(counts, design, block = b)` with `correlation` unset
-runs a serial `duplicateCorrelation` inside `voom`, so run `duplicateCorrelation_parallel()`
-first and pass its `consensus.correlation` to `voom` and to `lmFit_parallel()`;
-`lmFit_parallel()` given `block` and `correlation = NULL` resolves it through
-`duplicateCorrelation_parallel()` itself. Every function considered:
-[REFERENCE.md](REFERENCE.md#why-these-five-and-not-the-rest).
+- **Five companions.** `ComBat_seq_parallel()`, `calcNormFactors_parallel()`, `lmFit_parallel()`, `duplicateCorrelation_parallel()` and `removeBatchEffect_parallel()` take their original's arguments and defaults, plus `workers`, `chunks`, `parallel_backend`, `backend` and `label`.
+- **The original still runs.** Only its slow internal steps are swapped for parallel versions, in a child of its own environment. Output is checked with `identical()`, not a tolerance. The two exceptions are in [License](#license).
+- **Chosen to pay off.** Each step is slow at cohort scale, has no worker argument of its own, and splits without changing the answer. Every function considered is in [REFERENCE.md](REFERENCE.md#why-these-five-and-not-the-rest).
+- **A memory guard.** Before forking, it lowers the worker count so a large matrix does not exhaust RAM and get the process killed without an R error.
+- **Live progress.** On macOS and Linux every parallel dispatch draws a `|====------|` bar with chunks done and an ETA.
 
 ## Install
 
-The package needs `edgeR` and nothing else. Every other package below is optional, and
-only for the companion you actually call.
+The package needs `edgeR` and nothing else. Every other package is optional, and only for the companion you call.
 
 ```r
 if (!requireNamespace("BiocManager", quietly = TRUE)) install.packages("BiocManager")
@@ -91,31 +36,15 @@ remotes::install_github("NamStacks/RNA-Parallel",
                         upgrade = "never")
 ```
 
-Keep `upgrade = "never"`. Without it the installer offers to rebuild every outdated
-package in your library, most of which have nothing to do with this one.
+Keep `upgrade = "never"`. Without it the installer offers to rebuild every outdated package in your library.
 
-That is four packages on a clean library: `edgeR`, plus `limma`, `locfit` and `statmod`,
-which `edgeR` and `limma` require themselves. `lattice` and the rest ship with R.
+That is four packages on a clean library: `edgeR`, plus `limma`, `locfit` and `statmod`, which `edgeR` and `limma` require. `ComBat_seq_parallel()` also needs `sva`.
 
-Only one companion asks for anything beyond that:
-
-| Companion | Also install |
-|---|---|
-| `ComBat_seq_parallel()` | `sva` |
-| the other four | nothing |
-
-Backends work the same way. `"mclapply"` and `"serial"` need nothing; `"future"` needs `future`
-and `future.apply`, `"BiocParallel"` needs `BiocParallel`, and `"foreach"` needs `foreach` and
-`doParallel`. On macOS and Windows, install `ps` so the memory guard can read memory; Linux reads
-`/proc` and needs nothing. Without a reading the guard leaves the worker count as it is. Where base
-R has no `Sys.getppid()`, a forked worker reads its parent's process id from `/proc` on Linux and
-through `ps` elsewhere, and exits once its master has died; off Linux without `ps`, orphaned
-workers keep running.
+Backends work the same way. `"mclapply"` and `"serial"` need nothing, `"future"` needs `future` and `future.apply`, `"BiocParallel"` needs `BiocParallel`, and `"foreach"` needs `foreach` and `doParallel`. On macOS and Windows, install `ps` so the memory guard can read memory. Linux reads `/proc`.
 
 ## Use
 
-Each companion takes its original's arguments in the same order with the same defaults, and adds
-`workers`, `chunks`, `parallel_backend`, `backend` and `label`. All five in one pass:
+All five in one pass:
 
 ```r
 library(rnaparallel); library(edgeR); library(limma)
@@ -138,141 +67,87 @@ fit <- lmFit_parallel(v, design, block = subject,
 vis <- removeBatchEffect_parallel(v$E, batch = batch, design = design, workers = 8L)
 ```
 
-Interface differences: `duplicateCorrelation_parallel` requires `block`, whereas the original
-defaults it to `NULL`. `lmFit_parallel` and `removeBatchEffect_parallel` refuse
-`method = "robust"` and `ndups >= 2`, which limma accepts; call limma directly for those.
-`removeBatchEffect_parallel` declares `design = NULL`, current limma's default; left unset it is
-not forwarded, so the installed limma's own default applies. `calcNormFactors_parallel` accepts a matrix, a `DGEList` or a
-`SummarizedExperiment`, and refuses any other class that edgeR has its own method for; pass its
-count matrix instead. See
-[REFERENCE.md](REFERENCE.md#how-it-works) for why.
+Differences from the originals:
 
-**Check it yourself:** [REFERENCE.md](REFERENCE.md#full-self-check) has the full comparison
-against all five originals, no download required. At cohort scale, the same checks run as
-[rendered reports](https://namstacks.github.io/RNA-Parallel/) on all three platforms, sourced from
-[inst/examples/](inst/examples/); to rebuild one on your own machine, see
-[Rendering the reports](#rendering-the-reports). [tests/](tests/testthat) covers every argument path, chunk
-layout, backend, and dispatch count: 400+ assertions.
+- `duplicateCorrelation_parallel()` requires `block`, where the original defaults it to `NULL`.
+- `lmFit_parallel()` and `removeBatchEffect_parallel()` refuse `method = "robust"` and `ndups >= 2`. Call limma directly for those.
+- `removeBatchEffect_parallel()` declares `design = NULL`, current limma's default. Left unset, it is not forwarded.
+- `calcNormFactors_parallel()` accepts a matrix, a `DGEList` or a `SummarizedExperiment`, and refuses any other class edgeR has its own method for. Pass its count matrix instead.
+- `voom(counts, design, block = b)` with `correlation` unset runs a serial `duplicateCorrelation()`. Run `duplicateCorrelation_parallel()` first and pass its `consensus.correlation` to `voom()` and `lmFit_parallel()`. Given `block` and `correlation = NULL`, `lmFit_parallel()` resolves it itself.
 
-**See what's running:** on macOS and Linux every parallel dispatch draws a live `|====------|`
-bar by default, with chunks done and an ETA, overwritten in place. It draws only in an interactive
-session or on a terminal. A call that runs serially, every call on Windows, and every call whose
-output goes to a log tick a running "N dispatched" count instead.
-`options(combat.progress = FALSE)` silences both. `options(combat.timing = TRUE)` adds the real
-engine per call once it finishes, `serial` vs `mclapply x6`, etc., and `label = "..."` names the
-call in the progress and timing lines. The bar is drawn by a forked child, whose output may not
-reach an RStudio Server console. To follow a logged run, or one on RStudio Server or Windows, set
-`options(combat.progress.dir = "some/path")` and call
-`rnaparallel_progress("some/path", watch = TRUE)` from a second session. See
-[REFERENCE.md](REFERENCE.md#seeing-what-is-running).
-
-**Memory:** forking a large matrix can exceed a machine's RAM even when the parent alone fits,
-and on a box without swap the kernel SIGKILLs the process with no R error at all. The memory
-guard degrades the worker count before that happens, using a live reading, once per companion
-call, on by default; set `options(combat.mem.guard = FALSE)` to disable it. Inside a container or a
-scheduler job it reads the cgroup memory limit, not the host's RAM.
-`rnaparallel_set_mem_limit()` sets `R_MAX_VSIZE`, R's own allocation ceiling, to half the
-machine's RAM (or of the cgroup memory limit on Linux, when lower) rounded down to a whole tier (8, 16, 32 GB and up; an exact Mb value below 8 GB), so
-one process's overshoot becomes a catchable error instead of a silent kill. The limit is per
-process: each forked worker inherits it, so it does not bound the total across workers. On macOS
-it reads total RAM through `ps`. See [REFERENCE.md](REFERENCE.md#memory).
-
-## Tuning
+### Settings
 
 | knob | default | change it when |
 |---|---|---|
-| `workers` | `min(8, detectCores() - 2)`; inside a Slurm, SGE, PBS or LSF job or under a cgroup CPU quota, `min(8, allocation)`; capped at performance cores on Windows | rarely; going past your performance-core count can be slower |
-| `chunks` | `workers` | only to cut peak memory per worker |
+| `workers` | `min(8, detectCores() - 2)`; inside a Slurm, SGE, PBS or LSF job or under a cgroup CPU quota, `min(8, allocation)`; capped at performance cores on Windows | rarely, because going past your performance-core count can be slower |
+| `chunks` | `workers` | you need to cut peak memory per worker |
 | `parallel_backend` | `getOption("combat.backend")`, else `"mclapply"`; on Windows `"future"` when a multi-worker future plan is active | you cannot fork, or a cluster is already running |
 
-Full backend, nesting, and size-gate detail in [REFERENCE.md](REFERENCE.md#tuning-internals).
+- `options(combat.progress = FALSE)` silences the bar and the "N dispatched" count that stands in for it on Windows, in a log, or on a serial call.
+- `options(combat.timing = TRUE)` reports the engine each call used, such as `mclapply x6`. `label = "..."` names a call in both outputs.
+- `options(combat.progress.dir = "some/path")` plus `rnaparallel_progress("some/path", watch = TRUE)` in a second session follows a logged run, or one on RStudio Server or Windows.
+- `options(combat.mem.guard = FALSE)` turns the memory guard off. `rnaparallel_set_mem_limit()` sets R's own allocation ceiling to half the RAM, rounded down to a whole tier, so one process's overshoot becomes a catchable error. The limit is per process, so it does not bound the total across forked workers.
+
+Backends, nesting, size gates and memory detail are in [REFERENCE.md](REFERENCE.md#tuning-internals).
+
+## Speedup
+
+TCGA, 18,270 genes by 1,500 tumors, every arm `identical()` to the original. macOS: Mac mini M6, 6 fast + 6 efficiency cores. Linux: 2x Xeon, 16 cores. Windows: Ultra 9 185H, 6P+10E.
+
+| companion | runs | macOS | Linux | Windows |
+|---|---|---:|---:|---:|
+| `ComBat_seq_parallel()` | `sva::ComBat_seq` | 5.33x @ 8w | **9.34x @ 16w** | 3.57x @ 6w |
+| `calcNormFactors_parallel()` | `edgeR::normLibSizes` | **6.54x @ 8w** | 4.12x @ 8w | 1.74x @ 2w |
+| `lmFit_parallel()` | `limma::lmFit` | 1.84x @ 8w | **3.37x @ 16w** | 1.10x @ 4w |
+| `duplicateCorrelation_parallel()` | `limma::duplicateCorrelation` | 3.90x @ 6w | **7.22x @ 16w** | 2.07x @ 4w |
+| `removeBatchEffect_parallel()` | `limma::removeBatchEffect` | **2.94x @ 8w** | 1.39x @ 8w | 0.90x @ 2w |
+
+Bold marks the fastest platform per row. Windows has no `fork()`, so each worker is a full copied process, and only 6 of its 16 cores are performance cores. That caps its scaling, and `lmFit` and `removeBatchEffect` there are parity, not speedups. Every wall-clock number is in [REFERENCE.md](REFERENCE.md#cross-platform).
+
+The same checks run as rendered reports on all three platforms: [macOS](https://namstacks.github.io/RNA-Parallel/), [Linux](https://namstacks.github.io/RNA-Parallel/linux.html) and [Windows](https://namstacks.github.io/RNA-Parallel/windows.html). The macOS report was rendered with rnaparallel 0.5.1, and Linux and Windows with 0.5.0 until they are re-rendered. [REFERENCE.md](REFERENCE.md#full-self-check) has the full comparison against all five originals, and [tests/](tests/testthat) covers every argument path, chunk layout, backend and dispatch count with 400+ assertions.
 
 ## Rendering the reports
 
-The three reports in [inst/examples/](inst/examples/) are `RNA_Parallel.Rmd` (macOS),
-`RNA_Parallel_linux.Rmd` and `RNA_Parallel_windows.Rmd`. Each one runs the full cohort-scale
-check on the machine that renders it, so read this section before you start: a render takes
-several hours and a missing prerequisite can stop it late.
+The reports in [inst/examples/](inst/examples/) are `RNA_Parallel.Rmd` (macOS), `RNA_Parallel_linux.Rmd` and `RNA_Parallel_windows.Rmd`. Each runs the full cohort-scale check on the machine that renders it, and a render takes several hours.
 
-**Every platform**
+- **Software.** R 4.1 or newer is the package minimum. The published reports used R 4.6.1 on macOS and Windows 11, and R 4.4.2 on Ubuntu 20.04.6. `rmarkdown` needs pandoc, which RStudio Desktop supplies.
+- **Network.** The first render downloads about 6.8 GiB from the GDC (1,729 STAR count files for TCGA-HNSC, TCGA-LUAD and TCGA-LUSC) and queries the clinical table. Later renders reuse the files.
+- **Disk.** Keep 15 GB free in `tools::R_user_dir("rnaparallel", "cache")`, or in the folder named by the `RNAPARALLEL_TCGA_DIR` environment variable. Knitr also writes a `*_cache` folder next to the notebook. Never copy that folder between machines, because it holds the timings of the machine that made it.
+- **Power.** Timings are wall-clock. Plug in, close heavy programs and keep the machine awake until the render ends.
+- **Check the install.** After installing the package and restarting R, `BiocManager::valid()` must report `TRUE` and `packageVersion("rnaparallel")` must equal `Version` in `DESCRIPTION`. If `valid()` lists out-of-date packages, run `BiocManager::install(ask = FALSE)` and check again. Repeat both checks after every `git pull`, because a pull updates the source and not the installed package, and the report stops when the versions differ.
+- **Reinstalling is safe.** `.Rinstignore` keeps the caches, rendered HTML and GDC staging folders out of the installed library.
 
-- **R and RStudio Desktop.** `R >= 4.1` is the package minimum. The published reports used R 4.4.2
-  on macOS and on Ubuntu 20.04.6, and R 4.6.1 on Windows 11. RStudio also supplies pandoc, which
-  `rmarkdown` needs to write the HTML.
-- **Network.** The first render downloads about 6.8 GiB from the GDC (1,729 STAR count files for
-  TCGA-HNSC, TCGA-LUAD and TCGA-LUSC) and queries the clinical table, so keep a live connection
-  until that render ends. Later renders reuse the downloaded files. A report that saved a copy of
-  the clinical table reuses it too; one that did not asks the GDC again, so check which you have
-  before you render offline.
-- **Disk.** Keep at least 15 GB free where the files land: your user cache folder
-  (`tools::R_user_dir("rnaparallel", "cache")`), or the folder named in the `RNAPARALLEL_TCGA_DIR`
-  environment variable. Knitr also writes a `*_cache` folder next to the notebook. Do not copy a
-  `*_cache` folder from one machine to another: it holds the timings of the machine that made it,
-  and a copy would put those numbers in your report.
-- **Stay awake and plugged in.** Timings are wall-clock, so a sleep inside a timed arm lands in the
-  report, and a laptop on battery can throttle. Plug in, close heavy programs and do not let the
-  machine sleep until the render ends.
-- **Check the install.** After the package is installed and R restarted, run these two lines in
-  the R console. `BiocManager::valid()` must report `TRUE`, and the version must match `Version`
-  in the repo's `DESCRIPTION` file:
+<details>
+<summary>macOS</summary>
 
-  ```r
-  BiocManager::valid()
-  packageVersion("rnaparallel")
-  ```
-
-  If `valid()` lists out-of-date packages, run `BiocManager::install(ask = FALSE)`, restart R and
-  run the two checks again.
-
-- **Reinstalling is safe after a render.** `.Rinstignore` keeps the knitr caches, rendered HTML,
-  `GDCdata`, `MANIFEST.txt`, `df.rds`, `results.rds` and GDC staging folders out of the installed
-  library, so `R CMD INSTALL .` and `install.packages(<repo path>, repos = NULL, type = "source")`
-  from a repo that has already rendered both stay small.
-
-### macOS
-
-1. Install R 4.4 or newer for your chip from [CRAN](https://cran.r-project.org/bin/macosx/) and
-   [RStudio Desktop](https://posit.co/download/rstudio-desktop/). Binary packages need no
-   compiler; install the Xcode command line tools (`xcode-select --install`) only if R offers to
-   build a package from source. No RStudio: `brew install pandoc` instead.
-2. Get the repo: `git clone https://github.com/NamStacks/RNA-Parallel`, or `git pull` inside an
-   existing clone.
-3. Open `inst/examples/RNA_Parallel.Rmd` in RStudio and run its `install` chunk once (it is
-   `eval = FALSE`, so neither the script nor Knit runs it). Then, from the repo root in a
-   terminal, run `R CMD INSTALL .` and restart R, then run the two checks above. Repeat after
-   every `git pull`: a pull updates the source and not the installed package, and the report
-   stops when the two versions differ.
-4. Render with the script, or click Knit in RStudio:
+1. Install R 4.4 or newer from [CRAN](https://cran.r-project.org/bin/macosx/) and [RStudio Desktop](https://posit.co/download/rstudio-desktop/). Install the Xcode command line tools (`xcode-select --install`) only if R offers to build a package from source. Without RStudio, run `brew install pandoc`.
+2. Clone the repo, or `git pull` in an existing clone.
+3. Open `inst/examples/RNA_Parallel.Rmd` in RStudio and run its `install` chunk once. Then run `R CMD INSTALL .` from the repo root, restart R and run the install checks above.
+4. Render with the script, or click Knit. For Knit, run `caffeinate -i` in a terminal first.
 
    ```sh
    inst/examples/render_macos.sh
    ```
 
-   The script keeps the Mac awake while it runs. For Knit, run `caffeinate -i` in a terminal
-   first, or turn off automatic sleeping in System Settings.
-5. The HTML lands next to the notebook: `inst/examples/RNA_Parallel.html`. Send that one file
-   back, not `GDCdata`, `*_cache` or any `.rds`.
+5. Send back `inst/examples/RNA_Parallel.html` alone, not `GDCdata`, `*_cache` or any `.rds`.
 
-### Linux (Ubuntu 20.04 tested)
+</details>
 
-**One command.** Use a machine with 16 CPUs and nothing else running, because the report sweeps
-2, 4, 8 and 16 workers. Connect with VS Code Remote-SSH, open a terminal and run:
+<details>
+<summary>Linux (Ubuntu 20.04 tested)</summary>
+
+**One command.** Use a machine with 16 CPUs and nothing else running, because the report sweeps 2, 4, 8 and 16 workers. Connect with VS Code Remote-SSH, open a terminal and run:
 
 ```sh
 git clone https://github.com/NamStacks/RNA-Parallel && cd RNA-Parallel
 bash inst/examples/setup_linux.sh
 ```
 
-In an existing clone, run `git pull` first. The script installs what is missing (it asks for
-your sudo password only for apt), checks the install, and starts the render in the background, so
-closing VS Code does not stop it. Watch it with `tail -f inst/examples/render_linux.log`. When the
-render ends, the script commits `docs/linux.html` to the branch `linux-render` and pushes it. It
-stops before the render if the machine has fewer than 16 CPUs, little free memory or other load;
-`--yes` overrides that, and `--no-render` stops after the checks. The steps below do the same by
-hand.
+The script installs what is missing (it asks for your sudo password only for apt), checks the install and starts the render in the background, so closing VS Code does not stop it. Follow it with `tail -f inst/examples/render_linux.log`. When the render ends, the script commits `docs/linux.html` to the branch `linux-render` and pushes it. It stops first if the machine has fewer than 16 CPUs, little free memory or other load. `--yes` overrides that, and `--no-render` stops after the checks.
 
-1. Install the system libraries first. Without the headers, `xml2`, `XML`, `openssl`, `curl`,
-   `png` and `fs` fail to build, usually in the middle of the install:
+By hand:
+
+1. Install the system libraries before R packages, or `xml2`, `XML`, `openssl`, `curl`, `png` and `fs` fail to build:
 
    ```sh
    sudo apt-get update
@@ -280,10 +155,7 @@ hand.
      libcurl4-openssl-dev libssl-dev libxml2-dev libuv1-dev libpng-dev zlib1g-dev
    ```
 
-   Ubuntu's own `r-base` is too old (3.6.3 on 20.04). Install R from the CRAN apt repository
-   instead. The [CRAN page](https://cloud.r-project.org/bin/linux/ubuntu/) no longer lists 20.04,
-   but the `focal-cran40` repository is still served and its newest R for 20.04 is 4.5.2 (the
-   package needs 4.1 or newer). Add its signing key as that page describes, then the line:
+   Ubuntu's `r-base` is 3.6.3 on 20.04, which is too old. The `focal-cran40` repository is still served and carries R 4.5.2. Add its signing key as the [CRAN page](https://cloud.r-project.org/bin/linux/ubuntu/) describes, then:
 
    ```sh
    sudo add-apt-repository "deb https://cloud.r-project.org/bin/linux/ubuntu focal-cran40/"
@@ -291,80 +163,69 @@ hand.
    sudo apt-get install -y r-base r-base-dev
    ```
 
-   RStudio is optional: the script needs only R and pandoc 2.8 or newer, and the `pandoc` in
-   Ubuntu 20.04's archive is older than that. Take a pandoc `.deb` from
-   [github.com/jgm/pandoc/releases](https://github.com/jgm/pandoc/releases), or the RStudio
-   build that still supports 20.04: Desktop 2024.12.1-563
-   (`download1.rstudio.org/electron/focal/amd64/rstudio-2024.12.1-563-amd64.deb`) or Server
-   2025.05.1-513 (`download2.rstudio.org/server/focal/amd64/rstudio-server-2025.05.1-513-amd64.deb`).
-   Newer RStudio builds are for Ubuntu 22.04 and later and will not install on 20.04.
-2. Get the repo: `git clone https://github.com/NamStacks/RNA-Parallel`, or `git pull`.
-3. Open `inst/examples/RNA_Parallel_linux.Rmd` and run its `install` chunk once. Then, from the
-   repo root, run `R CMD INSTALL .`, restart R and run the two checks above. Repeat after every
-   `git pull`.
-4. Render with the script. Prefer it to Knit on Linux: it pins OpenBLAS to one thread before R
-   starts. Knit also works when RhpcBLASctl (installed by the install chunk) can pin the BLAS;
-   otherwise the report stops and prints the export command. Use `bash`, not `sh`.
+   RStudio is optional. The script needs R and pandoc 2.8 or newer, and 20.04's own `pandoc` is older. Take a `.deb` from [github.com/jgm/pandoc/releases](https://github.com/jgm/pandoc/releases), or the last RStudio builds that support 20.04: Desktop 2024.12.1-563 or Server 2025.05.1-513.
+2. Open `inst/examples/RNA_Parallel_linux.Rmd`, run its `install` chunk once, then run `R CMD INSTALL .` from the repo root, restart R and run the install checks above.
+3. Render with the script, not Knit, because it pins OpenBLAS to one thread before R starts. Use `bash`, not `sh`. It blocks sleep through `systemd-inhibit` when that is installed.
 
    ```sh
    bash inst/examples/render_linux.sh
    ```
 
-   The script blocks sleep through `systemd-inhibit` when that is installed; on a laptop, also
-   turn off suspend in the power settings.
-5. The HTML lands next to the notebook: `inst/examples/RNA_Parallel_linux.html`. Send that one
-   file back.
+4. Send back `inst/examples/RNA_Parallel_linux.html` alone.
 
-### Windows 11
+</details>
 
-1. Install R 4.6 or newer (64-bit) from [CRAN](https://cran.r-project.org/bin/windows/base/) and
-   [RStudio Desktop](https://posit.co/download/rstudio-desktop/). Rtools is not required: the
-   package has no compiled code and the dependencies ship Windows binaries. Install Rtools45
-   (CRAN lists it for R 4.5 and later) only if R offers to build a package from source and you
-   cannot answer No.
-2. Get the repo into a short folder outside OneDrive: install
-   [Git for Windows](https://git-scm.com/download/win) and run
-   `git clone https://github.com/NamStacks/RNA-Parallel C:\src\RNA-Parallel`, or download the ZIP
-   from GitHub, unzip it and rename the folder that holds `DESCRIPTION` to `C:\src\RNA-Parallel`.
-   Then, once, point the GDC download at a short path, because the default folder sits within a
-   few characters of Windows's 260-character path limit: `setx RNAPARALLEL_TCGA_DIR C:\tcga`.
-   Close and reopen RStudio, and open a new PowerShell window before you run the script, so both
-   see the variable.
-3. Open `inst/examples/RNA_Parallel_windows.Rmd` in RStudio and run its `install` chunk once.
-   Then, in the R console, install the package from the repo, restart R and run the two checks
-   above. Repeat after every `git pull`.
+<details>
+<summary>Windows 11</summary>
+
+**One command.** Clone into a short folder outside OneDrive, open a plain PowerShell window in it and run the script. It checks the machine, installs R and pandoc when missing, installs the packages, starts the render in a hidden window that survives closing yours, and pushes `docs/windows.html` to the branch `windows-render` when it ends. Plug in the charger and set Power mode to Best performance first.
+
+```powershell
+git clone https://github.com/NamStacks/RNA-Parallel C:\src\RNA-Parallel
+cd C:\src\RNA-Parallel
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File inst\examples\setup_windows.ps1
+```
+
+Add `-NoRender` to set up and check only. Follow the render with `Get-Content inst\examples\render_windows.log -Wait`. The log ends in PUBLISHED, PUSH FAILED, NOT PUBLISHED, REVIEW NEEDED or RENDER FAILED.
+
+By hand:
+
+1. Install R 4.6 or newer (64-bit) from [CRAN](https://cran.r-project.org/bin/windows/base/) and [RStudio Desktop](https://posit.co/download/rstudio-desktop/). Rtools is not required, because the package has no compiled code and the dependencies ship Windows binaries.
+2. Clone into `C:\src\RNA-Parallel` with [Git for Windows](https://git-scm.com/download/win), or unzip the GitHub ZIP there. Run `setx RNAPARALLEL_TCGA_DIR C:\tcga` once, because the default download folder sits within a few characters of Windows's 260-character path limit. Reopen RStudio and PowerShell so both see it.
+3. Open `inst/examples/RNA_Parallel_windows.Rmd` in RStudio and run its `install` chunk once. Then install the package from the repo, restart R and run the install checks above.
 
    ```r
    install.packages("C:/src/RNA-Parallel", repos = NULL, type = "source")
    ```
 
-4. Plug in, set Settings > System > Power & battery > Power mode to Best performance, and
-   render with the script. A stock Windows 11 has the execution policy `Restricted`, which
-   refuses to run any `.ps1` file, so the command below sets the policy for this one process
-   only. The script keeps the machine awake while it runs; for Knit, set sleep to Never first.
-   If Windows Defender Firewall asks whether R or Rscript may talk on the network when the first
-   parallel run starts, allow it on Private networks.
+4. Set Settings > System > Power & battery > Power mode to Best performance and render. A stock Windows 11 refuses `.ps1` files, so the command sets the execution policy for this one process. If Windows Defender Firewall asks about R or Rscript when the first parallel run starts, allow Private networks.
 
    ```powershell
    powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\src\RNA-Parallel\inst\examples\render_windows.ps1
    ```
 
-   Or open the notebook in RStudio and click Knit. Knit skips the BLAS thread pin, the keep-awake
-   call and the battery warning; the BLAS pin matters only on OpenBLAS and MKL builds of R.
-5. The HTML lands next to the notebook: `inst\examples\RNA_Parallel_windows.html`. Send that one
-   file back.
+   Knit also works, but skips the BLAS pin, the keep-awake call and the battery warning.
+5. Send back `inst\examples\RNA_Parallel_windows.html` alone.
+
+</details>
+
+## If something goes wrong
+
+| What you see | What to do |
+|---|---|
+| R exits with no error while workers run | The forked workers used more RAM than the machine has. Leave the memory guard on, lower `workers` or `chunks`, and call `rnaparallel_set_mem_limit()`. |
+| A warning says the worker count was lowered | The memory guard cut it to fit RAM. Free memory or lower `chunks`, or set `options(combat.mem.guard = FALSE)` if you accept the risk. |
+| No progress bar on RStudio Server or in a log | Set `options(combat.progress.dir = "some/path")` and run `rnaparallel_progress("some/path", watch = TRUE)` from a second session. |
+| Windows speedups are small | Windows cannot fork, so each worker is a full process fed over a socket. Use the `"future"` backend and keep `workers` at or below the performance-core count. |
+| A render stops with a message about the version | The installed `rnaparallel` is older than `DESCRIPTION`. Run `R CMD INSTALL .`, restart R and render again. |
+| A render stops because `duplicateCorrelation` ran under 1.5x at the widest arm | Power, throttling or background load kept the workers from running wide. Plug in, close other work, delete the `*_cache` folder and render again. |
+| You need `method = "robust"` or `ndups >= 2` | The companions refuse both. Call `limma::lmFit()` or `limma::removeBatchEffect()` directly. |
 
 ## License
 
-MIT for this companion, copyright NamStacks 2026, in [LICENSE](LICENSE). The original packages are
-called at run time from your own installation and none of them is redistributed here: sva is
-Artistic-2.0, limma and edgeR are GPL (>= 2). Two exceptions, both marked in source in
-`R/helper_seq_parallel.R`, and both used only while the installed original still matches them:
-a row-vectorized transcription of `sva::match_quantiles` (derived from Artistic-2.0 code by
-Zhang, Parmigiani, Johnson), and `.tagwise_defaults_pinned`, three one-line default formulas
-(`offset`, `span`, `AveLogCPM`) taken from edgeR 4.4.2's `estimateGLMTagwiseDisp.default`,
-which the tagwise row split computes once for the whole matrix. On any upstream change the
-companion detects the difference and calls the original instead.
+MIT for this companion, copyright NamStacks 2026, in [LICENSE](LICENSE). The original packages are called at run time from your own installation and none of them is redistributed here. sva is Artistic-2.0, and limma and edgeR are GPL (>= 2).
+
+Two pieces are transcribed and marked in `R/helper_seq_parallel.R`, and each is used only while the installed original still matches it. One is a row-vectorized transcription of `sva::match_quantiles`, derived from Artistic-2.0 code by Zhang, Parmigiani and Johnson. The other is `.tagwise_defaults_pinned`, three one-line default formulas (`offset`, `span`, `AveLogCPM`) from edgeR 4.4.2's `estimateGLMTagwiseDisp.default`, which the tagwise row split computes once for the whole matrix. On any upstream change the companion detects the difference and calls the original instead.
 
 ## Citation
 

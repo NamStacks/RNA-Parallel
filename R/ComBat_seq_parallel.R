@@ -90,12 +90,13 @@
 #'
 #' @section When this is worth reaching for:
 #' Almost always, and it is the companion with the most to win: the original is measured in
-#' minutes on a real cohort. Measured on an M3 at the default worker count, companion against
-#' original, every arm `identical()`: 4.63x at 6,000 genes by 120 samples.
+#' minutes on a real cohort. Measured on an M6 at the default worker count, companion against
+#' original, every arm `identical()`: 2.93x at 6,000 genes by 120 samples, where the memory guard
+#' ran 6 of the 8 workers.
 #'
 #' On a small input the four gates above send every dispatch serial, and the companion still
 #' runs faster than the original there, because its row-vectorized quantile match is a serial
-#' win: 1.20x at 300 genes by 20 samples with nothing dispatched.
+#' win: 1.23x at 300 genes by 20 samples with nothing dispatched.
 #'
 #' @param counts Raw count matrix, genes in rows, samples in columns. A data.frame is handed
 #'   to the original whole: it gets no speedup (the timing line reports `match_quantiles on
@@ -124,11 +125,11 @@
 #'   number when a second R process is also forking; six workers alongside one
 #'   kernel-panicked a 24 GB machine, and no core count read here can see that session.
 #'
-#'   Going past your PERFORMANCE core count can be slower than stopping at it, and the loss is
-#'   worst on the largest inputs, which is exactly where people reach for more workers.
-#'   Measured on an 8-core machine with 4 performance cores, TMM on 15,000 genes by 9,000
-#'   specimens: 4 workers 10.74 s, 6 workers 7.26 s, 8 workers 11.60 s. Eight was slower than
-#'   four. The default resolved to 6 there and was optimal; raising it by hand made it worse.
+#'   More workers is not always faster, and which count wins depends on the job. Measured on an
+#'   M6 with 6 fast cores of 12, `duplicateCorrelation_parallel()` on 3,000 genes by 100 arrays
+#'   ran 13x to 14x at 4 workers and 9.48x at the default 8, which the memory guard lowered to 7.
+#'   ComBat-seq on the TCGA cohort went the other way, 5.33x at 8 workers against 4.70x at 6, so
+#'   measure before raising the count by hand.
 #'
 #'   With `parallel_backend = "foreach"` and a backend you registered yourself, `workers` sets
 #'   only the default chunk count, and that backend's width bounds concurrency; see

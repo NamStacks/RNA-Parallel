@@ -17,9 +17,10 @@
 #'
 #' `statmod::mixedModel2Fit` calls `La.svd(QtZ, nu = mq, nv = 0)` once per gene, and `QtZ`
 #' reads only the `Z` columns of the effects, so every gene presents byte-identical arguments.
-#' Measured: 300 genes, 300 calls, every argument list identical to the first, and that one
-#' call is 47.5% of the original's wall clock. `factor` and `model.matrix` on the block variable
-#' are invariant the same way.
+#' Measured on an M6: 300 genes, 300 calls, every argument list identical to the first, and at
+#' 100 arrays that one call is about 60% of the original's wall clock. `factor` and
+#' `model.matrix` on the block variable are invariant the same way, and at 200 genes by 12
+#' arrays `model.matrix` is about 45% of it.
 #'
 #' @section Why this needs no gate:
 #' Nothing here holds original source. The original's own `mixedModel2Fit` object runs unchanged;
@@ -173,16 +174,16 @@ rp_tail_decomposes <- function(fn, ndups, max_block) {
 #'
 #' @section The per-gene memo:
 #' `mixedModel2Fit` reaches `La.svd(QtZ, nu = mq, nv = 0)` once per gene, and `QtZ` reads only
-#' the `Z` columns of the effects, so every gene presents byte-identical arguments. Measured:
-#' 300 genes, 300 calls, every argument list identical to the first, and that one call is 47.5%
-#' of the original's wall clock. `mixedModel2Fit` is a bare call in the original's loop, so it is
+#' the `Z` columns of the effects, so every gene presents byte-identical arguments. Measured on
+#' an M6: 300 genes, 300 calls, every argument list identical to the first, and at 100 arrays that
+#' one call is about 60% of the original's wall clock. `mixedModel2Fit` is a bare call in the original's loop, so it is
 #' rebound in a child of limma's environment onto a copy whose `La.svd` is memoised, along with
 #' the `factor` and `model.matrix` calls that rebuild the block design per gene.
 #'
 #' The memo is installed unconditionally, because each cache is keyed on what its call reads (the
 #' arguments, and for `model.matrix` the formula plus the values of the variables it names)
 #' rather than on an assumption about them. Where it pays is unweighted input: counted, 300
-#' genes give 300 calls and one distinct argument set, and it reaches 5.12x serial and 13.55x at
+#' genes give 300 calls and one distinct argument set, and it reaches about 5.7x serial and 13x to 14x at
 #' four workers on 3000 genes by 100 arrays with 50 blocks. Where it does not pay is weighted
 #' input, because `mixedModel2Fit` scales `X` by each gene's own weights before `La.svd` sees it, so the argument
 #' is not invariant: 300 calls, 300 distinct sets, a 0% hit rate. That costs nothing beyond one
@@ -207,10 +208,11 @@ rp_tail_decomposes <- function(fn, ndups, max_block) {
 #' far smaller sizes than the matrix paths, but not at every size.
 #'
 #' @section When this is worth reaching for:
-#' Unconditionally, and it has the best ratio of the five. One gene is one REML fit, so the
-#' split pays at sizes where the matrix companions are still gated. Measured on an M3 at the
-#' default worker count, companion against original, every arm `identical()`: 1.68x at 200 genes
-#' by 12 arrays, 2.70x at 1,000 x 24, 4.65x at 3,000 x 50 and 9.52x at 3,000 x 100.
+#' Unconditionally, and on simulated input it has the best ratio of the five. One gene is one REML fit, so the
+#' split pays at sizes where the matrix companions are still gated. Measured on an M6 at the
+#' default worker count, companion against original, every arm `identical()`: 1.71x at 200 genes
+#' by 12 arrays, 2.47x at 1,000 x 24, 5.73x at 3,000 x 50 and 9.48x at 3,000 x 100, where the
+#' memory guard ran 7 of the 8 workers. That last input runs faster at 4 workers, 13x to 14x.
 #'
 #' @param object A matrix, `EList`, `MAList` or `ExpressionSet`, as the original takes it.
 #' @param design Design matrix. Resolved once from the object when `NULL`, because a block
@@ -229,11 +231,11 @@ rp_tail_decomposes <- function(fn, ndups, max_block) {
 #'   number when a second R process is also forking; six workers alongside one
 #'   kernel-panicked a 24 GB machine, and no core count read here can see that session.
 #'
-#'   Going past your PERFORMANCE core count can be slower than stopping at it, and the loss is
-#'   worst on the largest inputs, which is exactly where people reach for more workers.
-#'   Measured on an 8-core machine with 4 performance cores, TMM on 15,000 genes by 9,000
-#'   specimens: 4 workers 10.74 s, 6 workers 7.26 s, 8 workers 11.60 s. Eight was slower than
-#'   four. The default resolved to 6 there and was optimal; raising it by hand made it worse.
+#'   More workers is not always faster, and which count wins depends on the job. Measured on an
+#'   M6 with 6 fast cores of 12, `duplicateCorrelation_parallel()` on 3,000 genes by 100 arrays
+#'   ran 13x to 14x at 4 workers and 9.48x at the default 8, which the memory guard lowered to 7.
+#'   ComBat-seq on the TCGA cohort went the other way, 5.33x at 8 workers against 4.70x at 6, so
+#'   measure before raising the count by hand.
 #'
 #'   With `parallel_backend = "foreach"` and a backend you registered yourself, `workers` sets
 #'   only the default chunk count, and that backend's width bounds concurrency; see

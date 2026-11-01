@@ -1,5 +1,5 @@
 #!/usr/bin/env Rscript
-## Times limma::lmFit against lmFit_parallel() on a simulated voom EList of 60,000 genes by 48 samples, unblocked and with block + correlation, at the package's default worker count; the source of the 3.70x and 4.35x in REFERENCE.md and the lmFit_parallel() help page, run as `Rscript tools/bench_lmfit.R` with rnaparallel installed.
+## Times limma::lmFit against lmFit_parallel() on a simulated voom EList of 60,000 genes by 48 samples, unblocked and with block + correlation, at the package's default worker count; the source of the 3.92x and 4.69x in REFERENCE.md and the lmFit_parallel() help page, run as `Rscript tools/bench_lmfit.R` with rnaparallel installed.
 suppressMessages({library(rnaparallel); library(edgeR); library(limma)})
 options(combat.progress = FALSE)
 set.seed(20261004)

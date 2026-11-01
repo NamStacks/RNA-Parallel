@@ -680,12 +680,14 @@ rp_dge_fwd <- function(sc, own, m, caller, fallback) {
 #' method divides by.
 #'
 #' @section Dispatches too small to be worth a fork:
-#' A fork costs about 60 ms here, so small matrices are slower parallelized than not, and
-#' each path has its own threshold because they do not cost the same per cell. The TMM and
-#' TMMwsp loops dispatch at or above `getOption("combat.min.norm.cells", 2e5)` cells:
-#' measured 0.50x at 1e5, 1.00x at 2e5, 1.85x at 5e5. The RLE and upperquartile loops take
-#' one order statistic per column and cost roughly a fifteenth as much, so they wait for
-#' `getOption("combat.min.order.cells", 4e6)`: measured 0.93x at 4e6 and 1.24x at 1e7. The
+#' A fork round trip costs about 6 to 12 ms on an M6, so small matrices are slower
+#' parallelized than not, and each path has its own threshold because they do not cost the same
+#' per cell. The TMM and TMMwsp loops dispatch at or above
+#' `getOption("combat.min.norm.cells", 2e5)` cells: TMM measured on an M6 with the gate forced
+#' open at 0.72x to 1.06x at 1e5, 1.20x to 1.58x at 2e5 and 2.07x to 2.47x at 5e5, over two runs.
+#' The RLE and upperquartile loops take one order statistic per column and cost roughly a
+#' fifteenth as much, so they wait for `getOption("combat.min.order.cells", 4e6)`: RLE measured
+#' 1.31x to 1.61x at 4e6 and 1.65x to 1.97x at 1e7. The
 #' `rank` hoist is not gated, because it never costs anything, and neither is `workers = 1`.
 #'
 #' Those defaults and measurements apply to a backend whose workers inherit the matrix: a
@@ -697,19 +699,20 @@ rp_dge_fwd <- function(sc, own, m, caller, fallback) {
 #' socket split only pays above about 2e6 cells. A matrix below its method's gate runs that
 #' loop serially. For TMM and TMMwsp the gate is 2e6. Only the RLE and upperquartile loops, and
 #' TMM's reference-column quantile loop (run only when `refColumn` is `NULL`), wait for 4e7.
-#' The ungated `rank` hoist still applies, so TMM stays ahead of edgeR there.
+#' The ungated `rank` hoist still applies, so TMM keeps pace with edgeR there.
 #'
 #' @section When this is worth reaching for:
 #' For `method = "TMM"`, the default, unconditionally. The `rank` hoist needs no workers at
-#' all, so this companion is ahead even on an input too small to dispatch. Measured on an M3
+#' all, so this companion is never behind on an input too small to dispatch. Measured on an M6
 #' at the default worker count, TMM, companion against original, every arm `identical()`:
-#' 1.44x at 2,000 genes by 20 samples with every dispatch gated, then 2.12x at 5,000 x 50,
-#' 3.90x at 20,000 x 50, 6.07x at 20,000 x 200 and 6.26x at 20,000 x 500.
+#' 1.00x at 2,000 genes by 20 samples with every dispatch gated, then 1.35x at 5,000 x 50,
+#' 2.73x at 20,000 x 50, 5.75x at 20,000 x 200 and 6.25x at 20,000 x 500, where the memory
+#' guard ran 6 of the 8 workers.
 #'
 #' The hoist is installed only into `.calcFactorTMM`. `TMMwsp`, `RLE` and `upperquartile` get
 #' none, so below their column-split gates (`combat.min.norm.cells` for TMMwsp,
 #' `combat.min.order.cells` for RLE and upperquartile) they run the original plus a fixed
-#' per-call overhead, which measured slower on small inputs: about 0.4x to 0.8x at 2,000 x 20.
+#' per-call overhead, which measured slower on small inputs: about 0.3x to 0.7x at 2,000 x 20.
 #' Call edgeR directly there.
 #'
 #' @param object Count matrix, genes in rows and samples in columns, a `DGEList`, or a
@@ -732,11 +735,11 @@ rp_dge_fwd <- function(sc, own, m, caller, fallback) {
 #'   number when a second R process is also forking; six workers alongside one
 #'   kernel-panicked a 24 GB machine, and no core count read here can see that session.
 #'
-#'   Going past your PERFORMANCE core count can be slower than stopping at it, and the loss is
-#'   worst on the largest inputs, which is exactly where people reach for more workers.
-#'   Measured on an 8-core machine with 4 performance cores, TMM on 15,000 genes by 9,000
-#'   specimens: 4 workers 10.74 s, 6 workers 7.26 s, 8 workers 11.60 s. Eight was slower than
-#'   four. The default resolved to 6 there and was optimal; raising it by hand made it worse.
+#'   More workers is not always faster, and which count wins depends on the job. Measured on an
+#'   M6 with 6 fast cores of 12, `duplicateCorrelation_parallel()` on 3,000 genes by 100 arrays
+#'   ran 13x to 14x at 4 workers and 9.48x at the default 8, which the memory guard lowered to 7.
+#'   ComBat-seq on the TCGA cohort went the other way, 5.33x at 8 workers against 4.70x at 6, so
+#'   measure before raising the count by hand.
 #'
 #'   With `parallel_backend = "foreach"` and a backend you registered yourself, `workers` sets
 #'   only the default chunk count, and that backend's width bounds concurrency; see

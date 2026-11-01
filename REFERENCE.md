@@ -22,38 +22,51 @@ this when the README's summary is not enough.
 
 ## When a companion is worth reaching for
 
-Measured on an Apple M3, at the default worker count. Ratio is companion speed against the
-original function, same input, same output.
+Measured on an Apple M6 (Mac mini, 12 cores) at its default 8 workers, made with
+[tools/bench_sizes.R](tools/bench_sizes.R) and [tools/bench_lmfit.R](tools/bench_lmfit.R); the
+TCGA ComBat-seq cell comes from the published macOS report.
+Ratio is companion speed against the original function, same input, same output, every pair
+`identical()`. Where the memory guard ran fewer workers, the cell says how many.
 
 | companion | runs | smallest size tested (genes x samples) | size where it turns faster | largest size tested |
 |---|---|---|---:|---:|
-| `duplicateCorrelation_parallel()` | `limma::duplicateCorrelation` | 1.68x at 200 x 12 | faster at every size tested | 9.52x at 3,000 x 100 |
-| `calcNormFactors_parallel()` | `edgeR::normLibSizes` | 1.44x at 2,000 x 20 (TMM) | TMM: faster at every size tested; other methods: only above their column gate | 6.26x at 20,000 x 500 (TMM) |
-| `ComBat_seq_parallel()` | `sva::ComBat_seq` | 1.20x at 300 x 20, nothing dispatched | faster at every size tested | 4.73x at the default 6 workers on the TCGA cohort, 18,270 x 1,500 (5.43x at 8) |
-| `lmFit_parallel()`, voom or probe weights | `limma::lmFit` | 1.00x below 2,000 genes (one original call) | 2,000 genes (`combat.min.wt.genes`) | 3.70x at 60,000 x 48 ([tools/bench_lmfit.R](tools/bench_lmfit.R)) |
-| `lmFit_parallel()`, no probe weights | `limma::lmFit` | 1.00x | 6M cells | splits only above the gate |
-| `removeBatchEffect_parallel()` | `limma::removeBatchEffect` | 1.00x at 2,000 x 20 | 6M cells | 1.91x at 20,000 x 500 |
+| `duplicateCorrelation_parallel()` | `limma::duplicateCorrelation` | 1.71x at 200 x 12, nothing dispatched | faster at every size tested | 9.48x at 3,000 x 100 (7 workers) |
+| `calcNormFactors_parallel()` | `edgeR::normLibSizes` | 1.00x at 2,000 x 20 (TMM) | TMM: 5,000 x 50 (1.35x); other methods: only above their column gate | 6.25x at 20,000 x 500 (TMM, 6 workers) |
+| `ComBat_seq_parallel()` | `sva::ComBat_seq` | 1.23x at 300 x 20, nothing dispatched | faster at every size tested | 5.33x on the TCGA cohort, 18,270 x 1,500 (4.70x at 6 workers) |
+| `lmFit_parallel()`, voom or probe weights | `limma::lmFit` | 0.92x to 0.96x below 2,000 genes (one original call plus about 0.5 ms) | about 4,000 genes; the gate (`combat.min.wt.genes`) opens at 2,000 | 3.92x at 60,000 x 48 (4.69x with block and correlation) |
+| `lmFit_parallel()`, no probe weights | `limma::lmFit` | 0.91x at 20,000 x 50 (one original call plus about 0.75 ms) | 6M cells | splits only above the gate |
+| `removeBatchEffect_parallel()` | `limma::removeBatchEffect` | 0.46x at 2,000 x 20 (companion 1.29 ms, original 0.59 ms) | 6M cells | 2.18x at 20,000 x 500 (3 workers) |
 
-`duplicateCorrelation_parallel()` and `calcNormFactors_parallel()` with `method = "TMM"` are
-faster at every size tested, for reasons that need no workers. `duplicateCorrelation_parallel()`
-memoises the `La.svd` call that statmod repeats with identical arguments for every gene, which
-measured 47.5% of the original's time at 300 genes. The 1.68x at 200 x 12 comes from that memo:
-2,400 cells sit under `combat.min.dupcor.cells` (5,000), so nothing is dispatched. Above that
-gate it also splits genes across workers. For `method = "TMM"`, `calcNormFactors_parallel()`
-computes each column's two rank vectors once instead of twice. `TMMwsp`, `RLE` and
-`upperquartile` get no such step, so below `combat.min.norm.cells` or `combat.min.order.cells`
-they run the original plus a fixed overhead, measured at about 0.4x to 0.8x at 2,000 x 20.
+`duplicateCorrelation_parallel()` is faster at every size tested, for a reason that needs no
+workers: it memoises the `factor`, `model.matrix` and `La.svd` calls that the original repeats
+with identical arguments for every gene. At 200 x 12 the repeated `model.matrix` call measured
+about 45% of the original's time; at 300 x 100 the repeated `La.svd` call measured about 60%. The 1.71x at
+200 x 12 comes from those memos: 2,400 cells sit under `combat.min.dupcor.cells` (5,000), so
+nothing is dispatched. Above that gate it also splits genes across workers.
+
+`calcNormFactors_parallel()` with `method = "TMM"` computes each column's two rank vectors once
+instead of twice. That runs at parity at 2,000 x 20 and is faster from 5,000 x 50 up. `TMMwsp`,
+`RLE` and `upperquartile` get no such step, so below `combat.min.norm.cells` or
+`combat.min.order.cells` they run the original plus a fixed overhead, measured at about 0.3x to
+0.7x at 2,000 x 20.
 
 `ComBat_seq_parallel()` gates every dispatch on a small input and is still faster there, because
 its row-vectorized quantile match beats the original's cell loop in one process.
 `lmFit_parallel()` with probe weights makes one plain original call below 2,000 genes, so it
-runs at parity there. From 2,000 genes (and 20,000 cells) its per-gene loop splits, measured
-1.39x to 1.75x at 2,000 genes with the gate forced open. `lmFit_parallel()` without probe
-weights, and `removeBatchEffect_parallel()`, run at the original's speed until the input is
+runs at parity there. From 2,000 genes (and 20,000 cells) its per-gene loop splits. With the
+gate forced open that split measured 0.60x to 0.69x at 2,000 genes, 0.99x to 1.13x at 4,000 and
+1.49x to 1.63x at 8,000 (the memory guard ran 6 or 7 of the 8 workers at 4,000 x 48 and above),
+so between 2,000 and about 4,000 genes the default gate lets the companion run slower than the
+original: by 13 to 16 ms per call at 2,000 genes, falling to nothing near 4,000. `lmFit_parallel()` without
+probe weights, and `removeBatchEffect_parallel()`, run at the original's speed until the input is
 large: limma fits every gene in one vectorized `lm.fit()` call that already takes milliseconds,
-and `removeBatchEffect` is that call plus one matrix product.
+and `removeBatchEffect` is that call plus one matrix product. Below that gate the measured
+ratios (1.25x at 20,000 x 50, 0.94x at 20,000 x 200) are run-to-run noise around parity, since
+nothing is dispatched.
 
-Using a companion on data that is too small costs one original call plus about 0.3 to 0.6 ms.
+Using a companion on data that is too small costs one original call plus about 0.5 to 0.75 ms
+for `lmFit_parallel()` and `removeBatchEffect_parallel()`, and about 1.6 to 1.9 ms for the
+`TMMwsp`, `RLE` and `upperquartile` methods of `calcNormFactors_parallel()`.
 That only adds up if it runs thousands of times in a loop, because each call checks its own size
 gate and cannot see the loop around it.
 
@@ -369,33 +382,33 @@ A function gets a companion only when it passes three tests.
 3. **It splits by gene rows or sample columns without changing the answer**, bit for bit.
 
 Serial time for each step, on one matrix of 20,000 genes by 300 samples (3 batches, 2 groups,
-150 subjects; 17,649 genes after `filterByExpr`), Apple M3, R 4.4.2 with its reference BLAS,
+150 subjects; 17,649 genes after `filterByExpr`), Apple M6 with R 4.6.1 and its reference BLAS,
 each original at its defaults, best of three for steps under 5 s, made with
 [tools/profile_pipelines.R](tools/profile_pipelines.R):
 
 | step | serial | companion | reason |
 |---|---:|---|---|
-| `limma::voomWithQualityWeights` | 906.5 s | no | sequential: each gene starts from the sample weights the previous gene left |
-| `limma::duplicateCorrelation` | 348.9 s | yes | one REML fit per gene |
-| `limma::lmFit`, block and correlation, voom weights | 60.0 s | yes | one generalized least squares fit per gene |
-| `sva::ComBat_seq` | 32.7 s | yes | quantile match per gene, dispersions per batch |
-| `DESeq2::DESeq` | 32.0 s | no | already parallel through `BPPARAM` |
-| `edgeR::estimateDisp` | 15.2 s | no | built and removed, not `identical()` |
-| `edgeR::glmQLFit` | 4.1 s | no | built and removed, not `identical()` |
-| `edgeR::normLibSizes`, TMM | 2.2 s | yes | one factor per sample; 10.3 s on the TCGA matrix |
-| `DESeq2::vst` | 0.91 s | no | not timed at cohort scale |
-| `limma::lmFit`, voom weights | 0.90 s | yes | one weighted fit per gene; 4.4 s on the TCGA matrix |
-| `sva::ComBat`, log-CPM, parametric | 0.55 s | no | already parallel through `BPPARAM`, and cheap |
-| `limma::voom` | 0.47 s | no | its `lowess` trend's span is a fraction of the gene count, so only the arithmetic after it splits; a companion measured 0.99x |
-| `edgeR::glmQLFTest` | 0.18 s | no | not timed at cohort scale |
-| `limma::removeBatchEffect` | 0.11 s | yes | cheap at 3 batches; 4.5 s on the TCGA matrix with 54 plates |
-| `DESeq2::results` | 0.06 s | no | cheap |
-| `edgeR::filterByExpr` | 0.03 s | no | cheap |
-| `limma::eBayes` | 0.013 s | no | cheap, and pools across genes |
-| `limma::topTable` | 0.004 s | no | cheap |
-| `limma::decideTests` | 0.004 s | no | cheap |
-| `edgeR::topTags` | 0.002 s | no | cheap |
-| `limma::contrasts.fit` | 0.001 s | no | cheap |
+| `limma::voomWithQualityWeights` | 576.2 s | no | sequential: each gene starts from the sample weights the previous gene left |
+| `limma::duplicateCorrelation` | 238.1 s | yes | one REML fit per gene |
+| `limma::lmFit`, block and correlation, voom weights | 38.1 s | yes | one generalized least squares fit per gene |
+| `sva::ComBat_seq` | 20.8 s | yes | quantile match per gene, dispersions per batch |
+| `DESeq2::DESeq` | 18.4 s | no | already parallel through `BPPARAM` |
+| `edgeR::estimateDisp` | 9.6 s | no | built and removed, not `identical()` |
+| `edgeR::glmQLFit` | 2.9 s | no | built and removed, not `identical()` |
+| `edgeR::normLibSizes`, TMM | 1.5 s | yes | one factor per sample; 7.0 s on the TCGA matrix |
+| `DESeq2::vst` | 0.53 s | no | not timed at cohort scale |
+| `limma::lmFit`, voom weights | 0.51 s | yes | one weighted fit per gene; 2.5 s on the TCGA matrix |
+| `sva::ComBat`, log-CPM, parametric | 0.29 s | no | already parallel through `BPPARAM`, and cheap |
+| `limma::voom` | 0.25 s | no | its `lowess` trend's span is a fraction of the gene count, so only the arithmetic after it splits |
+| `edgeR::glmQLFTest` | 0.11 s | no | not timed at cohort scale |
+| `limma::removeBatchEffect` | 0.06 s | yes | cheap at 3 batches; 2.9 s on the TCGA matrix with 54 plates |
+| `DESeq2::results` | 0.04 s | no | cheap |
+| `edgeR::filterByExpr` | 0.02 s | no | cheap |
+| `limma::eBayes` | 0.008 s | no | cheap, and pools across genes |
+| `limma::topTable` | 0.002 s | no | cheap |
+| `limma::decideTests` | 0.003 s | no | cheap |
+| `edgeR::topTags` | 0.001 s | no | cheap |
+| `limma::contrasts.fit` | <0.001 s | no | cheap |
 
 The rest fall into five groups.
 
@@ -406,8 +419,8 @@ The rest fall into five groups.
 `estimateGLMTagwiseDisp` with `prior.df > 0` and `glmQLFit` (it squeezes the quasi-likelihood
 dispersions); sva's `sva`, `svaseq`, `num.sv` and `fsva`; DESeq2's `estimateDispersionsFit`.
 
-**Not timed at cohort scale**, so no measurement shows that a fork would pay: `vst` (0.91 s) and
-`glmQLFTest` (0.18 s) were timed only on the 300-sample matrix above, and `glmLRT`, `exactTest`
+**Not timed at cohort scale**, so no measurement shows that a fork would pay: `vst` (0.53 s) and
+`glmQLFTest` (0.11 s) were timed only on the 300-sample matrix above, and `glmLRT`, `exactTest`
 and `cpm` not at all. `contrasts.fit`, `topTable`, `decideTests`, `topTags`, `filterByExpr` and
 `results` each took under 0.1 s here. `glmQLFTest`, `glmLRT` and `exactTest` also fit through
 edgeR's GLM kernels, the same kind of kernel the two removals below rest on.
@@ -418,14 +431,14 @@ drops the glmGamPoi estimator, so the result differs from a serial glmGamPoi run
 takes `BPPARAM` and splits across batches (default `SerialParam()`). sva's `f.pvalue` is matrix
 algebra that a multithreaded BLAS already spreads across cores.
 
-**Built, measured and removed.** Each ran faster, but its output was not `identical()`, and a
+**Built, tested and removed.** Each ran faster, but its output was not `identical()`, and a
 small speedup is not worth a different answer. Both rest on an edgeR fitting kernel whose result
 for a gene that does not converge cleanly depends on which other genes share its block.
 
-| companion | speedup measured | what changed in the output |
-|---|---|---|
-| `edgeR::estimateDisp` | 1.4x | 19,999 of 20,000 tagwise dispersions changed, once one library was over-sequenced |
-| `edgeR::glmQLFit` | 1.6x | 22 of 18,270 TCGA genes returned a different deviance and iteration count depending on which chunk they landed in, with no flag set |
+| companion | what changed in the output |
+|---|---|
+| `edgeR::estimateDisp` | 19,999 of 20,000 tagwise dispersions changed, once one library was over-sequenced |
+| `edgeR::glmQLFit` | some TCGA genes returned a different deviance and iteration count depending on which chunk they landed in, with no flag set |
 
 **Sequential by design.** `voomWithQualityWeights`, with its default `method = "genebygene"`,
 updates the sample weights inside its loop over genes: each gene starts from the weights the
@@ -458,9 +471,9 @@ splits limma's triangular solve (`backsolve`) by gene; the reports do not reach 
 
 | | macOS | Linux | Windows |
 |---|---|---|---|
-| CPU | Apple M3 | 2 x Intel Xeon @ 2.80 GHz | Intel Core Ultra 9 185H |
-| Physical cores | 8 (4 full-speed + 4 efficiency) | 16 | 16 (6 full-speed + 8 efficiency + 2 low-power) |
-| Logical cores | 8 | 32 | 22 |
+| CPU | Apple M6 (Mac mini) | 2 x Intel Xeon @ 2.80 GHz | Intel Core Ultra 9 185H |
+| Physical cores | 12 (6 full-speed + 6 efficiency) | 16 | 16 (6 full-speed + 8 efficiency + 2 low-power) |
+| Logical cores | 12 | 32 | 22 |
 | Can fork a worker | yes | yes | **no** |
 | Dispatch | forked children | forked children | separate processes over a socket |
 | Backend | `mclapply` | `mclapply` | `future` (`multisession`) |
@@ -476,18 +489,18 @@ the worker count that reached it.
 
 | stage | macOS | Linux | Windows |
 |---|---:|---:|---:|
-| `sva::ComBat_seq` | 1,619.8s -> **298.6s** (8w) | 3,043.8s -> 325.9s (16w) | 2,573.3s -> 720.1s (6w) |
-| `limma::duplicateCorrelation` | 663.7s -> 175.0s (6w) | 469.1s -> **64.9s** (16w) | 784.8s -> 379.3s (4w) |
-| `edgeR::normLibSizes` (TMM) | 10.3s -> **1.5s** (8w) | 19.5s -> 4.7s (8w) | 26.5s -> 15.2s (2w) |
-| `limma::lmFit` | 4.4s -> **1.5s** (8w) | 11.4s -> 3.4s (16w) | 10.1s -> 9.2s (4w) |
-| `limma::removeBatchEffect` | 4.5s -> **1.5s** (6w) | 2.5s -> 1.8s (8w) | 4.4s -> 4.9s (2w) |
+| `sva::ComBat_seq` | 1,044.4s -> **195.8s** (8w) | 3,043.8s -> 325.9s (16w) | 2,573.3s -> 720.1s (6w) |
+| `limma::duplicateCorrelation` | 452.7s -> 116.0s (6w) | 469.1s -> **64.9s** (16w) | 784.8s -> 379.3s (4w) |
+| `edgeR::normLibSizes` (TMM) | 7.0s -> **1.1s** (8w) | 19.5s -> 4.7s (8w) | 26.5s -> 15.2s (2w) |
+| `limma::lmFit` | 2.6s -> **1.4s** (8w) | 11.4s -> 3.4s (16w) | 10.1s -> 9.2s (4w) |
+| `limma::removeBatchEffect` | 2.9s -> **1.0s** (8w) | 2.5s -> 1.8s (8w) | 4.4s -> 4.9s (2w) |
 
 On Linux, set `OPENBLAS_NUM_THREADS=1` before starting R. Otherwise every forked worker starts
 its own set of math threads and they compete for the same cores. This matters for large matrix
 multiplication. It barely matters for `lmFit`, since
 limma solves one small problem per gene rather than one large one.
 
-Windows' original run time sits between the M3 and the Xeon (2,573.3s), so its lower speedup is
+Windows' original run time sits between the M6 and the Xeon (2,573.3s), so its lower speedup is
 not because the starting point was already fast, it genuinely finishes slower. With no fork,
 every worker is a full separate process, and only 6 of the 16 cores are full-speed, so
 ComBat-seq peaks at 3.57x at 6 workers and gets worse past that. `lmFit` and `removeBatchEffect`

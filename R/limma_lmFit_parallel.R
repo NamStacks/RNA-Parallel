@@ -215,10 +215,10 @@ rp_row_blocks <- function(M, weights, env, workers, chunks, parallel_backend, wh
 #' @section Dispatches too small to be worth a fork:
 #' The two branches of `lm.series` are not the same job. With probe weights, or an `EList`
 #' from [limma::voom()], limma runs an R loop over genes, and that forks well: measured
-#' 3.70x unblocked and 4.35x blocked on 60,000 genes by 48 samples at the default 6 workers on
-#' an M3 (`tools/bench_lmfit.R` in the GitHub repository,
+#' 3.92x unblocked and 4.69x blocked on 60,000 genes by 48 samples at the default 8 workers on
+#' an M6 (`tools/bench_lmfit.R` in the GitHub repository,
 #' <https://github.com/NamStacks/RNA-Parallel>),
-#' against 0.95x at 20,000 cells. This branch takes two gates:
+#' against 0.60x to 0.69x at 2,000 genes with the gates forced open. This branch takes two gates:
 #' `getOption("combat.min.cells", 20000)` cells, the gate ComBat-seq uses, and
 #' `getOption("combat.min.wt.genes", 2000)` genes, because the loop's cost is per gene and it
 #' is genes per worker that pay for a fork. A call below either one is one plain original call.
@@ -255,15 +255,18 @@ rp_row_blocks <- function(M, weights, env, workers, chunks, parallel_backend, wh
 #' With voom or probe weights limma runs an R loop over genes, which forks well but has a
 #' floor, and the floor is counted in genes rather than cells. Below
 #' `getOption("combat.min.wt.genes", 2000)` genes the companion is one plain original call, so
-#' it runs at parity. At and above it the split runs. That default sits where two measurement
-#' runs on an M3 at the default worker count agreed, with the gate forced open at 8, 24 and 48
-#' arrays: both put 2,000 genes and up ahead of the original, and they disagreed at 1,000
-#' genes, one ahead and one behind. The large-input figures are under "Dispatches too small to
-#' be worth a fork" above.
+#' it runs at parity. At and above it the split runs. Measured on an M6 at the default worker
+#' count with the gate forced open at 8, 24 and 48 arrays, the split ran at 0.60x to 0.69x at
+#' 2,000 genes, 0.99x to 1.13x at 4,000 and 1.49x to 1.63x at 8,000 (the memory guard ran 6 or 7
+#' of the 8 workers at 4,000 x 48 and above), so between 2,000 and about 4,000 genes it is slower
+#' than the original: by 13 to 16 ms per call at 2,000 genes, falling to nothing near 4,000. The
+#' large-input figures are under "Dispatches too small to be worth a fork" above.
 #'
 #' Without probe weights limma fits every gene in one vectorized `lm.fit`, which costs
 #' milliseconds, so the companion declines to split until the matrix is very large and is
-#' parity until then. That is not a missing measurement, it is the gate doing its job.
+#' near parity until then: measured on an M6 at 20,000 genes by 50 samples, below that gate,
+#' 0.91x, one original call plus about 0.75 ms. That is the gate doing its job. With voom
+#' weights below 2,000 genes it measured 0.92x to 0.96x, one original call plus about 0.5 ms.
 #'
 #' Under either gate the companion is one plain original call plus about half a millisecond.
 #' Nothing on a single call; worth avoiding in a loop over thousands of small fits, which is
@@ -291,11 +294,11 @@ rp_row_blocks <- function(M, weights, env, workers, chunks, parallel_backend, wh
 #'   number when a second R process is also forking; six workers alongside one
 #'   kernel-panicked a 24 GB machine, and no core count read here can see that session.
 #'
-#'   Going past your PERFORMANCE core count can be slower than stopping at it, and the loss is
-#'   worst on the largest inputs, which is exactly where people reach for more workers.
-#'   Measured on an 8-core machine with 4 performance cores, TMM on 15,000 genes by 9,000
-#'   specimens: 4 workers 10.74 s, 6 workers 7.26 s, 8 workers 11.60 s. Eight was slower than
-#'   four. The default resolved to 6 there and was optimal; raising it by hand made it worse.
+#'   More workers is not always faster, and which count wins depends on the job. Measured on an
+#'   M6 with 6 fast cores of 12, `duplicateCorrelation_parallel()` on 3,000 genes by 100 arrays
+#'   ran 13x to 14x at 4 workers and 9.48x at the default 8, which the memory guard lowered to 7.
+#'   ComBat-seq on the TCGA cohort went the other way, 5.33x at 8 workers against 4.70x at 6, so
+#'   measure before raising the count by hand.
 #'
 #'   With `parallel_backend = "foreach"` and a backend you registered yourself, `workers` sets
 #'   only the default chunk count, and that backend's width bounds concurrency; see

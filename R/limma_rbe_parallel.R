@@ -25,10 +25,12 @@
 #' @section When this is worth reaching for:
 #' On large matrices, and not before. This companion IS the `lmFit` call inside the original, so
 #' it inherits that function's answer exactly: below the least-squares gate there is nothing to
-#' split and the companion is the original plus about a millisecond. Measured on an M3 at the
-#' default worker count, companion against original, every arm `identical()`: 1.00x at 2,000
-#' genes by 20 samples, 0.92x at 20,000 x 50, 0.98x at 20,000 x 200, then 1.91x at 20,000 x 500
-#' once the matrix is large enough for the split to run at all.
+#' split and the companion is the original plus about a millisecond. Measured on an M6 at the
+#' default worker count, companion against original, every arm `identical()`: 0.46x at 2,000
+#' genes by 20 samples, where 0.7 ms of overhead sits on a 0.6 ms call; 1.25x at 20,000 x 50 and
+#' 0.94x at 20,000 x 200, run-to-run noise around parity with nothing dispatched; then 2.18x at
+#' 20,000 x 500 once the matrix is large enough for the split to run at all, where the memory
+#' guard ran 3 of the 8 workers.
 #'
 #' @param x,batch,batch2,covariates,design,group Passed to `limma::removeBatchEffect` unchanged.
 #'   One left out is not passed at all, so it takes the backend's own default.

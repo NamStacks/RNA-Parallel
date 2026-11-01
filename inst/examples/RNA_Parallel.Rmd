@@ -1449,7 +1449,7 @@ tier_n  <- vapply(seq_len(max(1, n_tiers, na.rm = TRUE)) - 1L,
                   function(i) sysctl_num(sprintf("hw.perflevel%d.physicalcpu", i)), numeric(1))
 tier_nm <- vapply(seq_along(tier_n) - 1L,
                   function(i) sysctl(sprintf("hw.perflevel%d.name", i))[1], character(1))
-# Every tier above the slowest counts as fast: 2 Super + 4 Performance on an M6, 4 Performance on an M3.
+# Every tier above the slowest counts as fast: 2 Super + 4 Performance on an M6.
 fast    <- if (length(tier_n) > 1L) head(tier_n, -1L) else tier_n
 n_perf  <- if (anyNA(fast) || sum(fast) < 1) n_phys else sum(fast)
 perf_lb <- if (length(tier_n) > 1L && !anyNA(tier_n))
@@ -1600,15 +1600,15 @@ stopifnot(dc_same)
 ### c. What is deliberately not parallelized
 
 Not everything survives the exactness bar, and the list of rejections is as much a part of this
-package as the list of companions. `voom` measured 0.99x on an earlier M3 run, because its `lowess` trend takes
+package as the list of companions. `voom` is left alone because its `lowess` trend takes
 its span as a fraction of the gene count. `contrasts.fit` returns before a fork could finish
 starting. `eBayes`, `fitFDist` and `topTable` pool across every gene by construction.
 
 Two edgeR companions were built, measured, and then deleted, both for the same reason: an edgeR
 kernel that is not a pure function of the gene it fits. `estimateDisp` diverged once one library
-was heavily over-sequenced. `glmQLFit` measured 1.6x on that M3 and passed every small fixture, then failed
+was heavily over-sequenced. `glmQLFit` passed every small fixture, then failed
 on this cohort: `mglmLevenberg` records a deviance and an iteration count whose values depend on
-which genes share the block when a fit does not converge cleanly, 22 of 18,270 genes in the original M3 render of this cohort, with
+which genes share the block when a fit does not converge cleanly, with
 no flag set on any of them. The assert in this report is what caught it, which is the reason
 every stage in this document carries one.
 
@@ -1699,7 +1699,7 @@ ggplot(limma_speed, aes(factor(workers), speedup, fill = stage)) +
 ```
 
 Not everything in limma is worth forking, and the list of what was left alone is as much a part
-of the result as the list of what was not. `voom` measured 0.99x on an earlier M3 run, because its `lowess`
+of the result as the list of what was not. `voom` is left alone because its `lowess`
 trend takes its span as a fraction of the gene count, so a block of half the genes fits a different curve and
 only the arithmetic after the trend splits. `contrasts.fit` is exactly splittable and the original
 returns before a fork could finish starting. `eBayes`, `fitFDist` and `topTable` pool across every gene by construction.
