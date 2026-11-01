@@ -32,6 +32,7 @@ Suggests:
     statmod,
     future,
     future.apply,
+    parallelly,
     BiocParallel,
     foreach,
     doParallel,

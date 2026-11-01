@@ -104,7 +104,7 @@ test_that("combat.fork = FALSE forces serial on every backend", {
   old <- getOption("combat.fork")
   options(combat.fork = FALSE)
   on.exit(options(combat.fork = old), add = TRUE)
-  if (requireNamespace("future.apply", quietly = TRUE) && future::supportsMulticore()) {
+  if (requireNamespace("future.apply", quietly = TRUE) && rnaparallel:::rp_supports_multicore()) {
     old_plan <- future::plan(future::multicore, workers = 2)
     on.exit(future::plan(old_plan), add = TRUE)
   }

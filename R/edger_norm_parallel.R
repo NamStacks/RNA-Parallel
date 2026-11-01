@@ -273,7 +273,7 @@ rp_ship_slices <- function(parallel_backend, workers, cells, min_cells, nchunks 
   }
   if (identical(parallel_backend, "future") &&
       isTRUE(tryCatch(future::nbrOfWorkers() < 2L ||
-                        (inherits(future::plan(), "multicore") && !future::supportsMulticore()),
+                        (inherits(future::plan(), "multicore") && !rp_supports_multicore()),
                       error = function(e) TRUE))) {
     return(FALSE)
   }

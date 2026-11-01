@@ -306,6 +306,14 @@ combat_row_order <- function(idx) {
 #' @noRd
 rp_home <- function() environment(rp_copy_free)
 
+#' Can this session fork a future worker?
+#'
+#' `future::supportsMulticore()` is deprecated in favor of the identical `parallelly::supportsMulticore()`, and its warning lands in whatever condition capture is running.
+#' @noRd
+rp_supports_multicore <- function() {
+  if (requireNamespace("parallelly", quietly = TRUE)) parallelly::supportsMulticore() else future::supportsMulticore()
+}
+
 
 #' Does a dispatch on this backend hand a worker the payload without copying it?
 #'
@@ -359,7 +367,7 @@ rp_copy_free <- function(parallel_backend) {
     mclapply = TRUE,
     BiocParallel = TRUE,
     future = isTRUE(tryCatch(
-      future::supportsMulticore() && inherits(future::plan(), "multicore"),
+      rp_supports_multicore() && inherits(future::plan(), "multicore"),
       error = function(e) FALSE)),
     foreach = {
       nm <- tryCatch(if (foreach::getDoParRegistered()) foreach::getDoParName() else NULL,
@@ -1843,7 +1851,7 @@ combat_parallel_lapply <- function(idx, f, workers,
 # Tested by behavior, not class, and before the reporter starts: under RStudio plan(multicore) falls back per future without changing its class, and a plan that resolves in one process gets no reporter.
   one_process <- parallel_backend == "future" &&
     (future::nbrOfWorkers() < 2L ||
-       (inherits(future::plan(), "multicore") && !future::supportsMulticore()))
+       (inherits(future::plan(), "multicore") && !rp_supports_multicore()))
 # Before the reporter starts, because mclapply with one core runs plain lapply in this process, outside every error path below, and nothing would write progress for a watcher to show.
   chk <- Sys.getenv("_R_CHECK_LIMIT_CORES_", "")
   check_cap <- if (nzchar(chk) && !identical(tolower(chk), "false")) 2L else Inf

@@ -477,7 +477,7 @@ test_that("the cancel message and the missing-result warning are muffled on ever
   skip_if(rnaparallel:::rp_host_cores() < 2L, "the dispatch needs 2 allowed cores to fork")
   killer <- function(ii) { if (ii == 2L) tools::pskill(Sys.getpid(), tools::SIGKILL); ii }
   idx <- as.list(1:4)
-  skip_if_not(future::supportsMulticore())
+  skip_if_not(rnaparallel:::rp_supports_multicore())
   old <- future::plan(future::multicore, workers = 2L)
   withr::defer(future::plan(old))
   for (be in "future") {
